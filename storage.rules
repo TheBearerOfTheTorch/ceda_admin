@@ -1,0 +1,48 @@
+rules_version = '2';
+
+// ===============================================================
+// Firebase Cloud Storage Security Rules — CEDA Innovation Documents
+// ===============================================================
+//
+// Path: /innovations/{innovationId}/documents/{fileName}
+// Stores supporting dossiers, technical specifications, financial models,
+// and CIPA registration certificates referenced in PostgreSQL `documents` table.
+// ===============================================================
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isAllowedDocumentType() {
+      return request.resource.contentType.matches('application/pdf') ||
+             request.resource.contentType.matches('image/.*') ||
+             request.resource.contentType.matches('text/csv') ||
+             request.resource.contentType.matches('application/json') ||
+             request.resource.contentType.matches('application/vnd.openxmlformats-officedocument.*') ||
+             request.resource.contentType.matches('application/msword') ||
+             request.resource.contentType.matches('application/vnd.ms-excel');
+    }
+
+    function isWithinSizeLimit() {
+      // Max 25 MB per supporting innovation document
+      return request.resource.size > 0 && request.resource.size <= 25 * 1024 * 1024;
+    }
+
+    match /innovations/{innovationId}/documents/{fileName} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() &&
+                               isWithinSizeLimit() &&
+                               isAllowedDocumentType() &&
+                               fileName.size() <= 200;
+      allow delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
+

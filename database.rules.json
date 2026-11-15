@@ -1,0 +1,22 @@
+{
+  "rules": {
+    ".read": true,
+    ".write": true,
+    "status": {
+      ".read": true,
+      ".write": true
+    },
+    "user_presence": {
+      ".read": true,
+      ".write": true
+    },
+    "canvas_moves": {
+      ".read": true,
+      ".write": true
+    },
+    "notifications": {
+      ".read": true,
+      ".write": true
+    }
+  }
+}

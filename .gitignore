@@ -1,0 +1,10 @@
+node_modules
+node_modules/
+node_modules.nosync/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
