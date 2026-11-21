@@ -1868,14 +1868,37 @@ export const publishAdjudicationQueueItem = async (item: any) => {
   }
 };
 
+export const removeAdjudicationQueueItem = async (id: string) => {
+  if (!id) return;
+  const docId = String(id).replace(/[^a-zA-Z0-9_.-]/g, '_');
+
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const bc = new BroadcastChannel(ADJUDICATION_QUEUE_BC);
+      bc.postMessage({ id: String(id), __deleted: true });
+      bc.close();
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!firestore) return;
+  try {
+    await deleteDoc(doc(firestore, 'adjudication_queue', docId));
+  } catch (err) {
+    console.warn('Firestore removeAdjudicationQueueItem notice:', err);
+  }
+};
+
 export const subscribeToAdjudicationQueue = (callback: (items: any[]) => void) => {
   const firestoreMap = new Map<string, any>();
   const broadcastMap = new Map<string, any>();
+  const deletedIds = new Set<string>();
 
   const emitMerged = () => {
     const merged = new Map<string, any>();
     for (const item of [...firestoreMap.values(), ...broadcastMap.values()]) {
-      if (!item?.id) continue;
+      if (!item?.id || deletedIds.has(String(item.id))) continue;
       merged.set(String(item.id), item);
     }
     callback(Array.from(merged.values()));
@@ -1888,7 +1911,14 @@ export const subscribeToAdjudicationQueue = (callback: (items: any[]) => void) =
       bc.onmessage = (ev) => {
         const data = ev?.data;
         if (data?.id) {
-          broadcastMap.set(String(data.id), data);
+          if (data.__deleted) {
+            deletedIds.add(String(data.id));
+            broadcastMap.delete(String(data.id));
+            firestoreMap.delete(String(data.id));
+          } else {
+            deletedIds.delete(String(data.id));
+            broadcastMap.set(String(data.id), data);
+          }
           emitMerged();
         }
       };
@@ -1907,7 +1937,10 @@ export const subscribeToAdjudicationQueue = (callback: (items: any[]) => void) =
           firestoreMap.clear();
           snapshot.forEach((d) => {
             const data = d.data();
-            if (data?.id) firestoreMap.set(String(data.id), data);
+            if (data?.id) {
+              deletedIds.delete(String(data.id));
+              firestoreMap.set(String(data.id), data);
+            }
           });
           emitMerged();
         },

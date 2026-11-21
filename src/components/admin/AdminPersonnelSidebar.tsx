@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { 
-  Users, UserCheck, ShieldCheck, Award, 
+import {
+  Users, UserCheck, ShieldCheck, Award,
   Search, Plus, Sparkles, Filter, ChevronRight,
   PanelLeftClose, PanelLeftOpen, Mail, Building, Briefcase, CheckCircle2, ArrowRight, Headphones,
   Trash2, UserX, RefreshCw, AlertTriangle
@@ -40,13 +40,13 @@ export const AdminPersonnelSidebar: React.FC<AdminPersonnelSidebarProps> = ({
   const [isSyncing, setIsSyncing] = useState(false);
 
   // Strict RBAC: Personnel must strictly be Evaluator, Adjudicator, Administrator, or Agent
-  const validPersonnel = personnel.filter(p => 
+  const validPersonnel = personnel.filter(p =>
     p.role === 'Evaluator' || p.role === 'Adjudicator' || p.role === 'Administrator' || p.role === 'Agent'
   );
 
   const filtered = validPersonnel.filter(p => {
     const matchesRole = roleFilter === 'All' || p.role === roleFilter;
-    const matchesSearch = 
+    const matchesSearch =
       p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       p.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
       p.department.toLowerCase().includes(searchQuery.toLowerCase());
@@ -77,8 +77,8 @@ export const AdminPersonnelSidebar: React.FC<AdminPersonnelSidebarProps> = ({
 
         <div className="flex flex-col items-center gap-4">
           <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" title="System Officials Active" />
-          <span 
-            className="text-[11px] font-bold text-slate-500 tracking-wider uppercase rotate-180" 
+          <span
+            className="text-[11px] font-bold text-slate-500 tracking-wider uppercase rotate-180"
             style={{ writingMode: 'vertical-rl' }}
           >
             System Officials ({validPersonnel.length})
@@ -167,54 +167,49 @@ export const AdminPersonnelSidebar: React.FC<AdminPersonnelSidebarProps> = ({
         <div className="flex items-center gap-1 mt-2.5 overflow-x-auto pb-1 text-[11px] scrollbar-none">
           <button
             onClick={() => setRoleFilter('All')}
-            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap ${
-              roleFilter === 'All'
-                ? 'bg-[#006194] text-white shadow-xs'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-            }`}
+            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap ${roleFilter === 'All'
+              ? 'bg-[#006194] text-white shadow-xs'
+              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
           >
             All ({validPersonnel.length})
           </button>
           <button
             onClick={() => setRoleFilter('Evaluator')}
-            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-1 ${
-              roleFilter === 'Evaluator'
-                ? 'bg-amber-600 text-white shadow-xs'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-            }`}
+            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-1 ${roleFilter === 'Evaluator'
+              ? 'bg-amber-600 text-white shadow-xs'
+              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
           >
             <UserCheck className="w-3 h-3" />
             Evaluators ({evaluatorCount})
           </button>
           <button
             onClick={() => setRoleFilter('Adjudicator')}
-            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-1 ${
-              roleFilter === 'Adjudicator'
-                ? 'bg-emerald-600 text-white shadow-xs'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-            }`}
+            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-1 ${roleFilter === 'Adjudicator'
+              ? 'bg-emerald-600 text-white shadow-xs'
+              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
           >
             <Award className="w-3 h-3" />
             Adjudicators ({adjudicatorCount})
           </button>
           <button
             onClick={() => setRoleFilter('Administrator')}
-            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-1 ${
-              roleFilter === 'Administrator'
-                ? 'bg-purple-600 text-white shadow-xs'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-            }`}
+            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-1 ${roleFilter === 'Administrator'
+              ? 'bg-purple-600 text-white shadow-xs'
+              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
           >
             <ShieldCheck className="w-3 h-3" />
             Admins ({adminCount})
           </button>
           <button
             onClick={() => setRoleFilter('Agent')}
-            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-1 ${
-              roleFilter === 'Agent'
-                ? 'bg-teal-600 text-white shadow-xs'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-            }`}
+            className={`px-2 py-1 rounded-md font-medium transition-colors whitespace-nowrap flex items-center gap-1 ${roleFilter === 'Agent'
+              ? 'bg-teal-600 text-white shadow-xs'
+              : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+              }`}
           >
             <Headphones className="w-3 h-3 text-teal-600" />
             Agents ({agentCount})
@@ -253,11 +248,19 @@ export const AdminPersonnelSidebar: React.FC<AdminPersonnelSidebarProps> = ({
           filtered.map((person) => {
             const isEvaluator = person.role === 'Evaluator';
             const isAdjudicator = person.role === 'Adjudicator';
+            const isAgent = person.role === 'Agent';
             const isAdmin = person.role === 'Administrator';
 
             // Workload threshold
-            const maxCap = isEvaluator ? 15 : isAdjudicator ? 12 : 5;
-            const loadPercent = Math.min(100, Math.round((person.assignedIdeasCount / maxCap) * 100));
+            const maxCap = isAgent
+              ? (person.maxChatCapacity || 3)
+              : isEvaluator
+                ? 15
+                : isAdjudicator
+                  ? 12
+                  : 5;
+            const currentCount = isAgent ? (person.assignedMessagesCount || 0) : person.assignedIdeasCount;
+            const loadPercent = Math.min(100, Math.round((currentCount / maxCap) * 100));
 
             return (
               <div
@@ -274,25 +277,23 @@ export const AdminPersonnelSidebar: React.FC<AdminPersonnelSidebarProps> = ({
                   <div className="flex items-center gap-2">
                     <div className="relative">
                       <div
-                        className={`w-7 h-7 rounded-full flex items-center justify-center font-bold text-[11px] text-white shadow-xs ${
-                          isEvaluator
-                            ? 'bg-linear-to-br from-amber-500 to-amber-600'
-                            : isAdjudicator
+                        className={`w-7 h-7 rounded-full flex items-center justify-center font-bold text-[11px] text-white shadow-xs ${isEvaluator
+                          ? 'bg-linear-to-br from-amber-500 to-amber-600'
+                          : isAdjudicator
                             ? 'bg-linear-to-br from-emerald-600 to-teal-700'
                             : 'bg-linear-to-br from-purple-600 to-indigo-700'
-                        }`}
+                          }`}
                       >
                         {person.avatarInitials}
                       </div>
                       <span
-                        className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${
-                          (() => {
-                            const pStatus = presenceMap[person.id] || presenceMap[person.email] || (person.status === 'active' ? 'online' : 'offline');
-                            return pStatus === 'online' || pStatus === 'reviewing' || pStatus === 'editing'
-                              ? 'bg-emerald-500 ring-2 ring-emerald-200'
-                              : 'bg-slate-300';
-                          })()
-                        }`}
+                        className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-white ${(() => {
+                          const pStatus = presenceMap[person.id] || presenceMap[person.email] || (person.status === 'active' ? 'online' : 'offline');
+                          return pStatus === 'online' || pStatus === 'reviewing' || pStatus === 'editing'
+                            ? 'bg-emerald-500 ring-2 ring-emerald-200'
+                            : 'bg-slate-300';
+                        })()
+                          }`}
                       />
                     </div>
                     <div>
@@ -310,15 +311,14 @@ export const AdminPersonnelSidebar: React.FC<AdminPersonnelSidebarProps> = ({
                   {/* Role Badge & Real-Time Presence Status */}
                   <div className="flex flex-col items-end gap-1">
                     <span
-                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${
-                        person.role === 'Evaluator'
-                          ? 'bg-amber-50 text-amber-700 border-amber-200'
-                          : person.role === 'Adjudicator'
+                      className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${person.role === 'Evaluator'
+                        ? 'bg-amber-50 text-amber-700 border-amber-200'
+                        : person.role === 'Adjudicator'
                           ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                           : person.role === 'Agent'
-                          ? 'bg-teal-50 text-teal-700 border-teal-200'
-                          : 'bg-purple-50 text-purple-700 border-purple-200'
-                      }`}
+                            ? 'bg-teal-50 text-teal-700 border-teal-200'
+                            : 'bg-purple-50 text-purple-700 border-purple-200'
+                        }`}
                     >
                       {person.role}
                     </span>
@@ -351,7 +351,7 @@ export const AdminPersonnelSidebar: React.FC<AdminPersonnelSidebarProps> = ({
                         {person.role === 'Agent' ? 'Assigned Enquiries:' : 'Assigned Load:'}
                       </span>
                       <span className="font-bold text-slate-800">
-                        {person.role === 'Agent' 
+                        {person.role === 'Agent'
                           ? `${person.assignedMessagesCount || 0} chats `
                           : `${person.assignedIdeasCount} ideas `}
                         <span className="text-slate-400 font-normal">
@@ -361,13 +361,12 @@ export const AdminPersonnelSidebar: React.FC<AdminPersonnelSidebarProps> = ({
                     </div>
                     <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
                       <div
-                        className={`h-full rounded-full transition-all duration-500 ${
-                          loadPercent > 80
-                            ? 'bg-rose-500'
-                            : loadPercent > 50
+                        className={`h-full rounded-full transition-all duration-500 ${loadPercent > 80
+                          ? 'bg-rose-500'
+                          : loadPercent > 50
                             ? 'bg-amber-500'
                             : 'bg-emerald-500'
-                        }`}
+                          }`}
                         style={{ width: `${loadPercent}%` }}
                       />
                     </div>
@@ -416,11 +415,10 @@ export const AdminPersonnelSidebar: React.FC<AdminPersonnelSidebarProps> = ({
                           e.stopPropagation();
                           onSuspendUser(person);
                         }}
-                        className={`font-semibold px-1.5 py-0.5 rounded transition-colors cursor-pointer text-[10px] ${
-                          person.status === 'away' || person.status === 'suspended'
-                            ? 'text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100'
-                            : 'text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100'
-                        }`}
+                        className={`font-semibold px-1.5 py-0.5 rounded transition-colors cursor-pointer text-[10px] ${person.status === 'away' || person.status === 'suspended'
+                          ? 'text-emerald-700 hover:text-emerald-900 bg-emerald-50 hover:bg-emerald-100'
+                          : 'text-amber-700 hover:text-amber-900 bg-amber-50 hover:bg-amber-100'
+                          }`}
                         title={person.status === 'away' || person.status === 'suspended' ? 'Reactivate this user account' : 'Suspend user access'}
                       >
                         {person.status === 'away' || person.status === 'suspended' ? 'Reactivate' : 'Suspend'}

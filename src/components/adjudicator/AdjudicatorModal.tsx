@@ -11,7 +11,7 @@ interface AdjudicatorModalProps {
   innovation: any | null;
   isOpen: boolean;
   onClose: () => void;
-  onAdjudicationComplete: () => void;
+  onAdjudicationComplete: (decision?: string) => void | Promise<void>;
 }
 
 export const AdjudicatorModal: React.FC<AdjudicatorModalProps> = ({
@@ -93,7 +93,7 @@ export const AdjudicatorModal: React.FC<AdjudicatorModalProps> = ({
         );
       }
 
-      onAdjudicationComplete();
+      await onAdjudicationComplete(decision);
       onClose();
     } catch (err) {
       console.error('Error submitting adjudication:', err);

@@ -43,14 +43,32 @@ export const AgentPortalView: React.FC<AgentPortalViewProps> = ({
 
   const agentAvailability = currentAgent.agentAvailability || 'available';
 
+  const matchesCurrentAgent = (m: SubmitterEnquiryMessage) => {
+    const emailMatch =
+      Boolean(currentUser?.email) &&
+      Boolean(m.assignedAgentEmail) &&
+      m.assignedAgentEmail!.trim().toLowerCase() === currentUser!.email.trim().toLowerCase();
+    const idMatch =
+      (currentUser?.id !== undefined && m.assignedAgentId === Number(currentUser.id)) ||
+      (currentAgent?.id !== undefined && m.assignedAgentId === Number(currentAgent.id));
+    const fullName = `${currentUser?.firstName || ''} ${currentUser?.lastName || ''}`.trim().toLowerCase();
+    const firstName = (currentUser?.firstName || '').trim().toLowerCase();
+    const assignedName = (m.assignedAgentName || '').trim().toLowerCase();
+    const nameMatch =
+      Boolean(assignedName) &&
+      ((Boolean(fullName) && assignedName === fullName) ||
+        (firstName.length >= 2 && assignedName.includes(firstName)));
+    return emailMatch || idMatch || nameMatch;
+  };
+
   // Active enquiries assigned to this agent
   const myAssignedMessages = messages.filter(
-    (m) => (m.assignedAgentId === currentAgent.id || m.assignedAgentName?.includes(currentUser?.firstName || '')) && m.status === 'assigned'
+    (m) => matchesCurrentAgent(m) && m.status === 'assigned'
   );
 
   // Resolved history handled by this agent
   const myResolvedMessages = messages.filter(
-    (m) => (m.assignedAgentId === currentAgent.id || m.assignedAgentName?.includes(currentUser?.firstName || '')) && m.status === 'resolved'
+    (m) => matchesCurrentAgent(m) && m.status === 'resolved'
   );
 
   // Auto-select first message if none selected

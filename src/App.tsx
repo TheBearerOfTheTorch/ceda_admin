@@ -90,6 +90,7 @@ import {
   publishCitizenEnquiry,
   subscribeToCitizenEnquiries,
   publishAdjudicationQueueItem,
+  removeAdjudicationQueueItem,
   subscribeToAdjudicationQueue,
 } from './lib/firebase.ts';
 import {
@@ -120,6 +121,11 @@ interface PersistedCanvasState {
   ideaCustomPositions?: Record<string, { x: number; y: number }>;
   poolCustomPositions?: Record<string, { x: number; y: number }>;
   messageCustomPositions?: Record<string, { x: number; y: number }>;
+  cardCustomDimensions?: Record<string, { width: number; height: number }>;
+  queueDimensions?: { width: number; height: number };
+  isQueueCollapsed?: boolean;
+  queueTab?: 'ideas' | 'messages' | 'adjudication';
+  updatedAtMs?: number;
   density?: CanvasDensity;
   zoom?: number;
   panX?: number;
@@ -204,8 +210,22 @@ function MainAppContent() {
   const [messageCustomPositions, setMessageCustomPositions] = useState<Record<string, { x: number; y: number }>>(
     () => savedState.messageCustomPositions ?? {}
   );
+  const [cardCustomDimensions, setCardCustomDimensions] = useState<Record<string, { width: number; height: number }>>(
+    () => savedState.cardCustomDimensions ?? {}
+  );
+  const [queueDimensions, setQueueDimensions] = useState<{ width: number; height: number }>(
+    () => savedState.queueDimensions ?? { width: 1280, height: 230 }
+  );
+  const [isQueueCollapsed, setIsQueueCollapsed] = useState<boolean>(
+    () => savedState.isQueueCollapsed ?? false
+  );
+  const [queueTab, setQueueTab] = useState<'ideas' | 'messages' | 'adjudication'>(
+    () => savedState.queueTab ?? 'ideas'
+  );
   const hydratedWorkspaceRef = useRef<string | null>(null);
   const applyingRemoteRef = useRef<boolean>(false);
+  const localUpdatedAtMsRef = useRef<number>(Number(savedState.updatedAtMs || 0));
+  const pendingSyncPayloadRef = useRef<{ wsId: string; payload: PersistedCanvasState; userId: number; email: string } | null>(null);
   const localClientIdRef = useRef<string>('client-' + Math.random().toString(36).slice(2, 10));
   const liveSubmissionsBufferRef = useRef<QueueIdeaItem[]>([]);
   const assignedIdeasRef = useRef<Record<string, QueueIdeaItem>>({});
@@ -464,6 +484,13 @@ function MainAppContent() {
     if (state.ideaCustomPositions && typeof state.ideaCustomPositions === 'object') setIdeaCustomPositions(state.ideaCustomPositions);
     if (state.poolCustomPositions && typeof state.poolCustomPositions === 'object') setPoolCustomPositions(state.poolCustomPositions);
     if (state.messageCustomPositions && typeof state.messageCustomPositions === 'object') setMessageCustomPositions(state.messageCustomPositions);
+    if (state.cardCustomDimensions && typeof state.cardCustomDimensions === 'object') setCardCustomDimensions(state.cardCustomDimensions);
+    if (state.queueDimensions && typeof state.queueDimensions === 'object') setQueueDimensions(state.queueDimensions);
+    if (typeof state.isQueueCollapsed === 'boolean') setIsQueueCollapsed(state.isQueueCollapsed);
+    if (state.queueTab) setQueueTab(state.queueTab);
+    if (typeof state.updatedAtMs === 'number') {
+      localUpdatedAtMsRef.current = Math.max(localUpdatedAtMsRef.current, state.updatedAtMs);
+    }
     if (state.density) setDensity(state.density);
     if (typeof state.zoom === 'number') setZoom(state.zoom);
     if (typeof state.panX === 'number') setPanX(state.panX);
@@ -560,6 +587,7 @@ function MainAppContent() {
     if (!activeWorkspaceId || !currentUser) return;
     let cancelled = false;
     hydratedWorkspaceRef.current = null;
+    localUpdatedAtMsRef.current = 0;
     const wsClearKey = `ceda_ws_queues_cleared_${activeWorkspaceId}_v1`;
     const needsInitialQueueClear = !localStorage.getItem(wsClearKey);
     let cleanedFirstFirestoreSnapshot = false;
@@ -573,12 +601,20 @@ function MainAppContent() {
       };
     };
 
+    const applyRemoteSafely = (stateObj: PersistedCanvasState) => {
+      applyingRemoteRef.current = true;
+      applyWorkspaceState(stateObj);
+      queueMicrotask(() => {
+        applyingRemoteRef.current = false;
+      });
+    };
+
     // 1. Instant hydration from workspace-scoped localStorage
     try {
       const cachedRaw = localStorage.getItem(`ceda_ws_${activeWorkspaceId}_v1`);
       if (cachedRaw) {
         const parsed = sanitizeStateIfClearing(JSON.parse(cachedRaw) as PersistedCanvasState);
-        applyWorkspaceState(parsed);
+        applyRemoteSafely(parsed);
         if (needsInitialQueueClear) {
           localStorage.setItem(`ceda_ws_${activeWorkspaceId}_v1`, JSON.stringify(parsed));
         }
@@ -603,7 +639,12 @@ function MainAppContent() {
           const data = await res.json();
           if (data.state && Object.keys(data.state).length > 0) {
             const nextState = sanitizeStateIfClearing(data.state as PersistedCanvasState);
-            applyWorkspaceState(nextState);
+            const remoteUpdatedAt = Number(nextState.updatedAtMs || 0);
+            if (localUpdatedAtMsRef.current > 0 && remoteUpdatedAt < localUpdatedAtMsRef.current) {
+              // Keep newer local edits and avoid overwriting them with stale DB state
+              return;
+            }
+            applyRemoteSafely(nextState);
             try {
               localStorage.setItem(`ceda_ws_${activeWorkspaceId}_v1`, JSON.stringify(nextState));
               if (needsInitialQueueClear) {
@@ -645,6 +686,10 @@ function MainAppContent() {
       (remoteState) => {
         if (cancelled) return;
         let stateToApply = remoteState as PersistedCanvasState;
+        const remoteUpdatedAt = Number(stateToApply.updatedAtMs || 0);
+        if (localUpdatedAtMsRef.current > 0 && remoteUpdatedAt < localUpdatedAtMsRef.current) {
+          return;
+        }
         if (needsInitialQueueClear && !cleanedFirstFirestoreSnapshot) {
           cleanedFirstFirestoreSnapshot = true;
           stateToApply = {
@@ -655,8 +700,7 @@ function MainAppContent() {
           localStorage.setItem(wsClearKey, 'true');
           saveWorkspaceToFirestore(activeWorkspaceId, stateToApply, localClientIdRef.current).catch(() => { });
         }
-        applyingRemoteRef.current = true;
-        applyWorkspaceState(stateToApply);
+        applyRemoteSafely(stateToApply);
         try {
           localStorage.setItem(`ceda_ws_${activeWorkspaceId}_v1`, JSON.stringify(stateToApply));
         } catch {
@@ -1014,15 +1058,20 @@ function MainAppContent() {
       const activeWsMeta = workspacesListRef.current.find((w) => w.id === activeWorkspaceIdRef.current);
       const isViewingSharedWorkspace = Boolean(activeWsMeta && activeWsMeta.isOwner === false);
 
-      // Filter out any ideas already promoted to Adjudication Queue
+      // Filter out ideas promoted to Adjudication Queue ONLY for Evaluators;
+      // Adjudicators must keep seeing their assigned adjudication items until Pilot sanctioning.
+      const isAdjUser = currentUser.role === 'Adjudicator';
       const filteredAssignments = (assignments || []).filter((a) => {
         const key = String(a.innovationId || a.idea?.id || '');
+        if (isAdjUser) {
+          return a.idea?.status !== 'adjudicated' && a.idea?.stageId !== 'pilot_phase';
+        }
         return !syncedAdjudicationIdsRef.current.has(key);
       });
 
       if (filteredAssignments.length === 0) {
         evaluatorAssignmentsSeededRef.current = true;
-        if (currentUser.role === 'Evaluator' && !isViewingSharedWorkspace) {
+        if ((currentUser.role === 'Evaluator' || currentUser.role === 'Adjudicator') && !isViewingSharedWorkspace) {
           setAssignedIdeasMap({});
           setQueueIdeas([]);
           setIdeaCustomPositions({});
@@ -1089,23 +1138,23 @@ function MainAppContent() {
         return next;
       });
 
-      // Synchronize horizontal queue so evaluator sees assigned ideas in their personal workspace
+      // Synchronize horizontal queue so Evaluator / Adjudicator sees assigned ideas in their personal workspace
       // When collaborating on someone else's shared workspace, keep the shared canvas intact!
-      if (currentUser.role === 'Evaluator' && !isViewingSharedWorkspace) {
+      if ((currentUser.role === 'Evaluator' || currentUser.role === 'Adjudicator') && !isViewingSharedWorkspace) {
         setQueueIdeas(newAssignedItems);
         // Automatically prune canvas positions if an idea was unassigned/deleted by admin
         setIdeaCustomPositions((prev) => {
           const next = { ...prev };
           let changed = false;
           Object.keys(next).forEach((id) => {
-            if (!assignedInnovationIds.has(id)) {
+            if (!id.startsWith('__') && !id.startsWith('eval__') && !assignedInnovationIds.has(id)) {
               delete next[id];
               changed = true;
             }
           });
           return changed ? next : prev;
         });
-        // Evaluators do NOT have an admin station card or stacked ideas
+        // Evaluators & Adjudicators do NOT have an admin station card or stacked ideas
         setCanvasStations((prev) => prev.filter((s) => s.userId !== currentUser.id && !s.id.startsWith(`station_evaluator_${currentUser.id}`)));
       } else if (newAssignedItems.length > 0 && !isViewingSharedWorkspace) {
         setQueueIdeas((prev) => {
@@ -1132,6 +1181,9 @@ function MainAppContent() {
       return;
     }
 
+    const nowMs = Date.now();
+    localUpdatedAtMsRef.current = nowMs;
+
     const payload: PersistedCanvasState = {
       projects,
       connectors,
@@ -1150,6 +1202,11 @@ function MainAppContent() {
       ideaCustomPositions,
       poolCustomPositions,
       messageCustomPositions,
+      cardCustomDimensions,
+      queueDimensions,
+      isQueueCollapsed,
+      queueTab,
+      updatedAtMs: nowMs,
       density,
       zoom,
       panX,
@@ -1173,7 +1230,15 @@ function MainAppContent() {
       console.warn('Could not persist canvas state:', err);
     }
 
+    pendingSyncPayloadRef.current = {
+      wsId: activeWorkspaceId,
+      payload,
+      userId: currentUser.id,
+      email: currentUser.email,
+    };
+
     const timer = setTimeout(() => {
+      pendingSyncPayloadRef.current = null;
       fetch(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/state`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -1182,7 +1247,11 @@ function MainAppContent() {
           updatedBy: currentUser.id,
           updatedByEmail: currentUser.email,
         }),
-      }).catch(() => { });
+      })
+        .then((res) => {
+          if (!res.ok) console.warn('Workspace state PUT returned status:', res.status);
+        })
+        .catch(() => { });
 
       saveWorkspaceToFirestore(activeWorkspaceId, payload, localClientIdRef.current).catch(() => { });
     }, 350);
@@ -1208,6 +1277,10 @@ function MainAppContent() {
     ideaCustomPositions,
     poolCustomPositions,
     messageCustomPositions,
+    cardCustomDimensions,
+    queueDimensions,
+    isQueueCollapsed,
+    queueTab,
     density,
     zoom,
     panX,
@@ -1223,6 +1296,34 @@ function MainAppContent() {
     showGrid,
     showConnectors,
   ]);
+
+  useEffect(() => {
+    const flushPendingWorkspaceSync = () => {
+      const pending = pendingSyncPayloadRef.current;
+      if (!pending) return;
+      pendingSyncPayloadRef.current = null;
+      try {
+        fetch(`/api/workspaces/${encodeURIComponent(pending.wsId)}/state`, {
+          method: 'PUT',
+          keepalive: true,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            state: pending.payload,
+            updatedBy: pending.userId,
+            updatedByEmail: pending.email,
+          }),
+        }).catch(() => { });
+      } catch {
+        // ignore
+      }
+    };
+    window.addEventListener('beforeunload', flushPendingWorkspaceSync);
+    window.addEventListener('pagehide', flushPendingWorkspaceSync);
+    return () => {
+      window.removeEventListener('beforeunload', flushPendingWorkspaceSync);
+      window.removeEventListener('pagehide', flushPendingWorkspaceSync);
+    };
+  }, []);
 
   const captureCanvasSnapshot = () => {
     return JSON.stringify({
@@ -1472,23 +1573,50 @@ function MainAppContent() {
   const personnelWithLiveLoad = useMemo(() => {
     return personnel.map((person) => {
       const assignedIds = new Set<string>();
+      const assignedMsgIds = new Set<string>();
+      const personEmailLower = (person.email || '').trim().toLowerCase();
+      const personNameLower = (person.name || '').trim().toLowerCase();
+
       canvasStations.forEach((st) => {
         const sameUser =
           st.userId === person.id ||
-          (person.email &&
+          (personEmailLower &&
             st.user?.email &&
-            st.user.email.toLowerCase() === person.email.toLowerCase());
+            st.user.email.trim().toLowerCase() === personEmailLower);
         if (sameUser && Array.isArray(st.assignedIdeaIds)) {
           st.assignedIdeaIds.forEach((id) => assignedIds.add(String(id)));
+        }
+        if (sameUser && Array.isArray(st.assignedMessageIds)) {
+          st.assignedMessageIds.forEach((msgId) => {
+            const msg = enquiryMessages.find((m) => m.id === msgId);
+            if (!msg || msg.status === 'assigned') {
+              assignedMsgIds.add(String(msgId));
+            }
+          });
+        }
+      });
+
+      enquiryMessages.forEach((m) => {
+        if (m.status !== 'assigned') return;
+        const matchId = m.assignedAgentId !== undefined && m.assignedAgentId === person.id;
+        const matchEmail = Boolean(
+          personEmailLower && m.assignedAgentEmail && m.assignedAgentEmail.trim().toLowerCase() === personEmailLower
+        );
+        const matchName = Boolean(
+          personNameLower && m.assignedAgentName && m.assignedAgentName.trim().toLowerCase() === personNameLower
+        );
+        if (matchId || matchEmail || matchName) {
+          assignedMsgIds.add(String(m.id));
         }
       });
 
       return {
         ...person,
         assignedIdeasCount: assignedIds.size,
+        assignedMessagesCount: assignedMsgIds.size,
       };
     });
-  }, [personnel, canvasStations]);
+  }, [personnel, canvasStations, enquiryMessages]);
 
   // Real-Time Submitter Alerts (View Logs, Tab Access, Screening Gates & Clarification Messages)
   const seenSubmitterNotifIdsRef = useRef<Set<string>>(new Set());
@@ -1676,7 +1804,9 @@ function MainAppContent() {
   };
 
   const handleSaveWorkspaceNow = async () => {
-    if (!currentUser || !activeWorkspaceId) return;
+    if (!currentUser) return;
+    const nowMs = Date.now();
+    localUpdatedAtMsRef.current = nowMs;
     const payload: PersistedCanvasState = {
       projects,
       connectors,
@@ -1695,6 +1825,11 @@ function MainAppContent() {
       ideaCustomPositions,
       poolCustomPositions,
       messageCustomPositions,
+      cardCustomDimensions,
+      queueDimensions,
+      isQueueCollapsed,
+      queueTab,
+      updatedAtMs: nowMs,
       density,
       zoom,
       panX,
@@ -1711,14 +1846,24 @@ function MainAppContent() {
       showConnectors,
     };
     try {
+      localStorage.setItem(CANVAS_STATE_STORAGE_KEY, JSON.stringify(payload));
+      if (!activeWorkspaceId) {
+        showToast('Workspace saved locally');
+        return;
+      }
       localStorage.setItem(`ceda_ws_${activeWorkspaceId}_v1`, JSON.stringify(payload));
-      await fetch(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/state`, {
+      pendingSyncPayloadRef.current = null;
+      const res = await fetch(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/state`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ state: payload, updatedBy: currentUser.id, updatedByEmail: currentUser.email }),
       });
       await saveWorkspaceToFirestore(activeWorkspaceId, payload, localClientIdRef.current);
-      showToast('Workspace saved to local storage, PostgreSQL & Firestore');
+      if (res.ok) {
+        showToast('Workspace saved to local storage, PostgreSQL & Firestore');
+      } else {
+        showToast('Workspace saved locally & Firestore (server sync retry queued)');
+      }
     } catch {
       showToast('Workspace saved locally');
     }
@@ -1851,16 +1996,18 @@ function MainAppContent() {
     const targetAgent = sortedAgents[0];
 
     setEnquiryMessages((prev) =>
-      prev.map((msg) =>
-        msg.id === nextMsg.id
-          ? {
-            ...msg,
-            status: 'assigned',
-            assignedAgentId: targetAgent.id,
-            assignedAgentName: targetAgent.name,
-          }
-          : msg
-      )
+      prev.map((msg) => {
+        if (msg.id !== nextMsg.id) return msg;
+        const updated: SubmitterEnquiryMessage = {
+          ...msg,
+          status: 'assigned',
+          assignedAgentId: targetAgent.id,
+          assignedAgentName: targetAgent.name,
+          assignedAgentEmail: targetAgent.email,
+        };
+        publishCitizenEnquiry(updated).catch(() => { });
+        return updated;
+      })
     );
 
     setPersonnel((prev) =>
@@ -1885,6 +2032,7 @@ function MainAppContent() {
 
   // Agent Portal Handlers
   const handleSendMessageFromAgent = (messageId: string, text: string) => {
+    const senderName = currentUser ? `${currentUser.firstName} ${currentUser.lastName}`.trim() : 'Agent Helpdesk';
     setEnquiryMessages((prev) =>
       prev.map((msg) => {
         if (msg.id !== messageId) return msg;
@@ -1895,13 +2043,22 @@ function MainAppContent() {
             {
               id: `reply-${Date.now()}`,
               sender: 'agent',
-              senderName: currentUser ? `${currentUser.firstName} ${currentUser.lastName}` : 'Agent Helpdesk',
+              senderName,
               text,
               timestamp: 'Just now',
             },
           ],
         };
         publishCitizenEnquiry(updatedMsg).catch(() => {});
+        publishNotification({
+          innovationId: msg.ideaCode || msg.id,
+          type: 'Citizen enquiry',
+          message: `🎧 ${senderName} replied to your enquiry "${msg.subject}": ${text.slice(0, 90)}`,
+          user: senderName,
+          targetRole: 'Submitter',
+          ideaTitle: msg.subject,
+          submitterName: msg.submitterName,
+        }).catch(() => {});
         return updatedMsg;
       })
     );
@@ -1951,6 +2108,7 @@ function MainAppContent() {
             status: 'assigned',
             assignedAgentId: agent.id,
             assignedAgentName: agent.name,
+            assignedAgentEmail: agent.email,
           };
           publishCitizenEnquiry(updatedNext).catch(() => {});
           return updatedNext;
@@ -2024,6 +2182,7 @@ function MainAppContent() {
           status: 'assigned',
           assignedAgentId: agent.id,
           assignedAgentName: agent.name,
+          assignedAgentEmail: agent.email,
         };
         publishCitizenEnquiry(updated).catch(() => {});
         return updated;
@@ -2082,16 +2241,18 @@ function MainAppContent() {
     const skippedCount = messageIds.length - assignableIds.length;
 
     setEnquiryMessages((prev) =>
-      prev.map((msg) =>
-        assignableIds.includes(msg.id)
-          ? {
-            ...msg,
-            status: 'assigned',
-            assignedAgentId: agent.id,
-            assignedAgentName: agent.name,
-          }
-          : msg
-      )
+      prev.map((msg) => {
+        if (!assignableIds.includes(msg.id)) return msg;
+        const updated: SubmitterEnquiryMessage = {
+          ...msg,
+          status: 'assigned',
+          assignedAgentId: agent.id,
+          assignedAgentName: agent.name,
+          assignedAgentEmail: agent.email,
+        };
+        publishCitizenEnquiry(updated).catch(() => {});
+        return updated;
+      })
     );
 
     setPersonnel((prev) =>
@@ -2725,7 +2886,10 @@ function MainAppContent() {
   };
 
   const handleAdvanceIdeaStage = async (ideaId: string) => {
-    const assignedIdea = assignedIdeasMap[ideaId] || queueIdeas.find((i) => i.id === ideaId);
+    const assignedIdea =
+      assignedIdeasMap[ideaId] ||
+      queueIdeas.find((i) => i.id === ideaId) ||
+      syncedAdjudicationIdeas.find((i) => String(i.id) === String(ideaId));
     const proj = projects.find(
       (p) =>
         p.id === ideaId ||
@@ -2738,6 +2902,132 @@ function MainAppContent() {
     const ideaTitle = proj?.title || assignedIdea?.title || ideaId;
     const ideaCode = assignedIdea?.code || proj?.stageTag || ideaId;
     const submitterName = assignedIdea?.submitterName || proj?.applicant?.name;
+    const isAdjudicatorAction = currentUser?.role === 'Adjudicator';
+
+    if (isAdjudicatorAction) {
+      // Adjudicator approves Stage 5 Board Adjudication -> advances proposal to Stage 6 Sandbox & Pilot Phase
+      recordStageTransitionLifecycle(
+        {
+          id: proj?.id || ideaId,
+          code: ideaCode,
+          title: ideaTitle,
+          enterpriseName: assignedIdea?.enterpriseName || proj?.applicant?.organization,
+          submitterName,
+          cipaUin: assignedIdea?.cipaUin || proj?.cipaNumber,
+          bursTin: assignedIdea?.bursTin || proj?.bursTin,
+        },
+        'pilot_phase',
+        actorName,
+        'Adjudicator',
+        {
+          status: 'passed',
+          notes: `Adjudicator ${actorName} sanctioned Board Adjudication approval for "${ideaTitle}" and moved it to Stage 6: Sandbox & Pilot Phase.`,
+        }
+      );
+
+      setProjects((prev) =>
+        prev.map((p) => {
+          if (
+            p.id === ideaId ||
+            (ideaTitle && normalizeIdeaKeyTitle(p.title) === normalizeIdeaKeyTitle(ideaTitle))
+          ) {
+            return {
+              ...p,
+              stageId: 'pilot_phase',
+              lastUpdated: 'Just now',
+            };
+          }
+          return p;
+        })
+      );
+
+      setAssignedIdeasMap((prev) => {
+        const next = { ...prev };
+        delete next[ideaId];
+        return next;
+      });
+
+      setQueueIdeas((prev) =>
+        prev.filter(
+          (item) =>
+            String(item.id) !== String(ideaId) &&
+            (!ideaTitle || normalizeIdeaKeyTitle(item.title) !== normalizeIdeaKeyTitle(ideaTitle))
+        )
+      );
+
+      syncedAdjudicationIdsRef.current.delete(String(ideaId));
+      setSyncedAdjudicationIdeas((prev) =>
+        prev.filter((item) => String(item.id) !== String(ideaId))
+      );
+      removeAdjudicationQueueItem(ideaId).catch(() => {});
+
+      setCanvasStations((prev) =>
+        prev.map((st) => ({
+          ...st,
+          assignedIdeaIds: (st.assignedIdeaIds || []).filter((id) => String(id) !== String(ideaId)),
+        }))
+      );
+
+      setIdeaCustomPositions((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          if (k === ideaId || k.startsWith(`eval__${ideaId}`)) {
+            delete next[k];
+          }
+        });
+        return next;
+      });
+
+      if (currentUser?.id) {
+        deleteIdeaAssignment(currentUser.id, ideaId).catch(() => {});
+      }
+      deleteIdeaAssignmentsByInnovationId(ideaId).catch(() => {});
+
+      fetch('/api/innovations/sync-stage', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: proj?.id || ideaId,
+          code: ideaCode,
+          title: ideaTitle,
+          stage: 'pilot_phase',
+          status: 'approved',
+          userId: currentUser?.id,
+          actionNote: `Sanctioned by Adjudicator (${actorName}) and moved to Pilot Phase.`,
+        }),
+      }).catch(() => {});
+
+      sendSubmitterStageUpdateEmail({
+        innovationId: proj?.id || ideaId,
+        code: ideaCode,
+        title: ideaTitle,
+        previousStage: 'Board Adjudication',
+        newStage: 'Sandbox & Pilot Phase',
+        outcome: 'passed',
+        actorName,
+        actorRole: 'Adjudicator',
+        notes: `Your innovation proposal "${ideaTitle}" has received Board Adjudication sanction and advanced to Stage 6: Sandbox & Pilot Phase.`,
+        submitterName,
+      });
+
+      showToast(`🏛️ "${ideaTitle}" sanctioned for Pilot Phase & cleared from your Adjudication Queue!`);
+
+      publishNotification({
+        innovationId: ideaId,
+        type: 'Pilot approved',
+        message: `Board Decision: Proposal "${ideaTitle}" was sanctioned by ${actorName} and moved to Pilot Phase.`,
+        user: actorName,
+        targetRole: 'Administrator',
+      }).catch(console.warn);
+
+      publishActivity({
+        innovationId: ideaId,
+        action: 'stage_advanced',
+        user: actorName,
+        role: 'Adjudicator',
+      });
+      return;
+    }
 
     // Record Stage 3 (Evaluation) & Stage 4 (Expert Review) completion and promote to Stage 5 (Approval Board)
     recordStageTransitionLifecycle(
@@ -3588,7 +3878,9 @@ function MainAppContent() {
     const station = canvasStations.find((s) => s.id === stationId);
     if (!station || !ideaIds || ideaIds.length === 0) return;
 
-    // Filter from queueIdeas, evaluatorAssignedIdeas, assignedIdeasMap, or projects
+    const isAssigningToAdjudicator = station.user.role === 'Adjudicator';
+
+    // Filter from queueIdeas, evaluatorAssignedIdeas, adjudicationQueueIdeas, syncedAdjudicationIdeas, assignedIdeasMap, or projects
     const ideasToAssign: QueueIdeaItem[] = ideaIds
       .map((id) => {
         const inQueue = queueIdeas.find((i) => i.id === id);
@@ -3596,6 +3888,11 @@ function MainAppContent() {
 
         const inEval = evaluatorAssignedIdeas.find((i) => i.id === id);
         if (inEval) return inEval;
+
+        const inAdj =
+          adjudicationQueueIdeas.find((i) => String(i.id) === String(id)) ||
+          syncedAdjudicationIdeas.find((i) => String(i.id) === String(id));
+        if (inAdj) return inAdj;
 
         if (assignedIdeasMap[id]) return assignedIdeasMap[id];
 
@@ -3625,6 +3922,7 @@ function MainAppContent() {
     if (ideasToAssign.length === 0) return;
 
     // Enforce Stage 2 Statutory & Tax Screening Gate (CIPA & BURS) if enabled by Administrator
+    // Proposals already promoted to Adjudication have already cleared Stage 2 & Technical Evaluation.
     let finalIdeasToAssign = ideasToAssign.map((idea) => {
       if (idea.screening?.status === 'verified') return idea;
       const lifecycle = getLifecycleRecordForIdea({
@@ -3634,7 +3932,7 @@ function MainAppContent() {
       });
       return lifecycle?.screening ? { ...idea, screening: lifecycle.screening } : idea;
     });
-    if (currentUser?.role === 'Administrator' && enforceStatutoryGate) {
+    if (currentUser?.role === 'Administrator' && enforceStatutoryGate && !isAssigningToAdjudicator) {
       const verified = finalIdeasToAssign.filter((i) => i.screening?.status === 'verified');
       const unverified = finalIdeasToAssign.filter((i) => i.screening?.status !== 'verified');
 
@@ -3665,12 +3963,23 @@ function MainAppContent() {
       finalIdeasToAssign.map((i) => normalizeIdeaKeyTitle(i.title)).filter(Boolean)
     );
 
-    // Record Stage 2 (Screening Passed) & Stage 3 (Evaluator Assignment) in shared lifecycle store
+    // Record lifecycle event (Stage 3 Evaluator assignment vs Stage 5 Adjudicator assignment)
     finalIdeasToAssign.forEach((idea) => {
-      recordEvaluatorAssignmentLifecycle(idea, station.user.name, station.userId);
+      if (isAssigningToAdjudicator) {
+        recordIdeaAuditEvent(idea, {
+          action: `Assigned to Adjudicator: ${station.user.name} for Stage 5 Board Adjudication`,
+          author: currentUser ? `${currentUser.firstName} ${currentUser.lastName}`.trim() : 'Administrator',
+          authorRole: 'Administrator',
+          tabName: 'Stage 5 Adjudication Assignment',
+          eventType: 'stage_transition',
+          notes: `Assigned proposal "${idea.title}" to Adjudicator ${station.user.name} for National Board quorum decision.`,
+        });
+      } else {
+        recordEvaluatorAssignmentLifecycle(idea, station.user.name, station.userId);
+      }
     });
 
-    // Advance matching projects to Stage 3 (Evaluation) so Submitter view updates immediately
+    // Advance matching projects to Stage 3 (Evaluation) or Stage 5 (Approval Board) so Submitter view updates immediately
     setProjects((prev) =>
       prev.map((p) => {
         const pTitleKey = normalizeIdeaKeyTitle(p.title);
@@ -3682,7 +3991,9 @@ function MainAppContent() {
         if (!matchedIdea) return p;
         return {
           ...p,
-          stageId: STAGE_ORDER.indexOf(p.stageId) < 2 ? 'evaluation' : p.stageId,
+          stageId: isAssigningToAdjudicator
+            ? (STAGE_ORDER.indexOf(p.stageId) < 4 ? 'approval_board' : p.stageId)
+            : (STAGE_ORDER.indexOf(p.stageId) < 2 ? 'evaluation' : p.stageId),
           screening: matchedIdea.screening || p.screening,
           lastUpdated: 'Just now',
         };
@@ -3695,9 +4006,10 @@ function MainAppContent() {
         updated[idea.id] = {
           ...idea,
           evaluatorId: station.userId,
-          status: 'evaluating',
-          progress: Math.floor(10 + Math.random() * 25),
-        };
+          status: isAssigningToAdjudicator ? 'completed' : 'evaluating',
+          progress: isAssigningToAdjudicator ? 100 : Math.floor(10 + Math.random() * 25),
+          ...(isAssigningToAdjudicator ? { stageId: 'approval_board', stage: 'adjudication' } : {}),
+        } as QueueIdeaItem;
       });
       return updated;
     });
@@ -3751,12 +4063,12 @@ function MainAppContent() {
         body: JSON.stringify({
           toEmail: station.user.email,
           recipientName: station.user.name,
-          subject: `CEDA Assignment: ${finalIdeasToAssign.length} Proposal(s) Assigned for Evaluation`,
-          title: 'New Ideas Assigned for Your Evaluation',
-          message: `You have been assigned ${finalIdeasToAssign.length} proposal(s) on the CEDA Innovation Canvas: ${finalIdeasToAssign.map((i) => `"${i.title}"`).join(', ')}. Please log in to complete technical screening and scoring.`,
+          subject: `CEDA Assignment: ${finalIdeasToAssign.length} Proposal(s) Assigned for ${isAssigningToAdjudicator ? 'Board Adjudication' : 'Evaluation'}`,
+          title: isAssigningToAdjudicator ? 'New Proposals Assigned for Board Adjudication' : 'New Ideas Assigned for Your Evaluation',
+          message: `You have been assigned ${finalIdeasToAssign.length} proposal(s) on the CEDA Innovation Canvas: ${finalIdeasToAssign.map((i) => `"${i.title}"`).join(', ')}. Please log in to complete ${isAssigningToAdjudicator ? 'board adjudication and decision sanctioning' : 'technical screening and scoring'}.`,
           badge: 'ACTION REQUIRED',
           actionUrl: window.location.origin,
-          actionText: 'Open Evaluator Canvas',
+          actionText: isAssigningToAdjudicator ? 'Open Adjudicator Canvas' : 'Open Evaluator Canvas',
           details: {
             'Official Assigned': station.user.name,
             'Total Assigned Ideas': `${finalIdeasToAssign.length} proposals`,
@@ -3772,8 +4084,11 @@ function MainAppContent() {
         .catch((err) => console.warn('Assignment email notice:', err));
     }
 
-    // 3. Persist assignment to Firestore for evaluator cross-device & cross-login hydration
+    // 3. Persist assignment to Firestore for evaluator/adjudicator cross-device & cross-login hydration
     finalIdeasToAssign.forEach((idea) => {
+      const enrichedIdea = isAssigningToAdjudicator
+        ? ({ ...idea, stageId: 'approval_board', stage: 'adjudication' } as any)
+        : idea;
       saveIdeaAssignment({
         innovationId: idea.id,
         ideaTitle: idea.title,
@@ -3781,12 +4096,12 @@ function MainAppContent() {
         evaluatorEmail: station.user.email,
         evaluatorName: station.user.name,
         assignedAt: new Date().toISOString(),
-        status: 'evaluating',
-        idea,
+        status: isAssigningToAdjudicator ? 'adjudication' : 'evaluating',
+        idea: enrichedIdea,
       }).catch(console.warn);
     });
 
-    showToast(`Assigned ${finalIdeasToAssign.length} ideas from Queue to ${station.user.name}!`);
+    showToast(`Assigned ${finalIdeasToAssign.length} proposal(s) to ${station.user.name} (${station.user.role})!`);
   };
 
   const handleReassignIdeaBetweenStations = (
@@ -4691,21 +5006,35 @@ function MainAppContent() {
     currentUser?.role === 'Adjudicator';
 
   const evaluatorAssignedIdeas = useMemo(() => {
-    const promotedSet = new Set(syncedAdjudicationIdeas.map((i) => String(i.id)));
-    const list = Object.values(assignedIdeasMap).filter(
-      (i) => i.status !== 'completed' && !promotedSet.has(String(i.id))
-    );
+    const promotedSet = isAdjudicator
+      ? new Set<string>()
+      : new Set(syncedAdjudicationIdeas.map((i) => String(i.id)));
+    const isActiveForReviewer = (i: QueueIdeaItem) => {
+      if (isAdjudicator) {
+        return (i.status as string) !== 'adjudicated' && (i as any).stageId !== 'pilot_phase';
+      }
+      return i.status !== 'completed' && !promotedSet.has(String(i.id));
+    };
+
+    const list = Object.values(assignedIdeasMap).filter(isActiveForReviewer);
     if (list.length > 0) return list;
     const userStation = canvasStations.find((s) => s.userId === currentUser?.id);
     if (userStation && userStation.assignedIdeaIds.length > 0) {
       return queueIdeas.filter(
-        (q) => userStation.assignedIdeaIds.includes(q.id) && q.status !== 'completed' && !promotedSet.has(String(q.id))
+        (q) => userStation.assignedIdeaIds.includes(q.id) && isActiveForReviewer(q)
       );
     }
     return [];
-  }, [assignedIdeasMap, canvasStations, currentUser?.id, queueIdeas, syncedAdjudicationIdeas]);
+  }, [isAdjudicator, assignedIdeasMap, canvasStations, currentUser?.id, queueIdeas, syncedAdjudicationIdeas]);
 
   const adjudicationQueueIdeas = useMemo(() => {
+    const adjudicatorAssignedIds = new Set(
+      canvasStations
+        .filter((s) => s.user.role === 'Adjudicator')
+        .flatMap((s) => s.assignedIdeaIds || [])
+        .map(String)
+    );
+
     const fromAssigned = Object.values(assignedIdeasMap).filter(
       (idea) => idea.status === 'completed' || (idea as any).stage === 'adjudication' || (idea as any).stageId === 'approval_board'
     );
@@ -4731,8 +5060,14 @@ function MainAppContent() {
     fromProjects.forEach((item) => map.set(String(item.id), item));
     fromAssigned.forEach((item) => map.set(String(item.id), item));
     syncedAdjudicationIdeas.forEach((item) => map.set(String(item.id), item));
-    return Array.from(map.values());
-  }, [assignedIdeasMap, projects, syncedAdjudicationIdeas]);
+
+    return Array.from(map.values()).filter(
+      (item) =>
+        !adjudicatorAssignedIds.has(String(item.id)) &&
+        (item.status as string) !== 'adjudicated' &&
+        (item as any).stageId !== 'pilot_phase'
+    );
+  }, [assignedIdeasMap, projects, syncedAdjudicationIdeas, canvasStations]);
 
   if (authLoading) {
     return (
@@ -4867,9 +5202,51 @@ function MainAppContent() {
                     isOpen={isSidebarOpen}
                     onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
                     onOpenInviteModal={() => setIsInviteUserOpen(true)}
+                    role={currentUser?.role}
                     onReviewIdea={(idea) => {
-                      const proj = projects.find((p) => p.id.includes(idea.id));
-                      if (proj) setEvaluatingProject(proj);
+                      const proj = projects.find((p) => p.id === idea.id || p.id.includes(idea.id));
+                      if (proj) {
+                        if (isAdjudicator) {
+                          setAdjudicatingProject(proj);
+                        } else {
+                          setEvaluatingProject(proj);
+                        }
+                        return;
+                      }
+                      const syntheticProj: ProjectCardData = {
+                        id: idea.id,
+                        title: idea.title,
+                        stageTag: idea.code || `[INT-${idea.id.slice(-3)}]`,
+                        stageId: isAdjudicator ? 'approval_board' : 'evaluation',
+                        applicant: {
+                          name: idea.submitterName || 'Citizen Promoter',
+                          nationalId: idea.omangId || 'BW-902184910',
+                          organization: idea.enterpriseName || 'Enterprise Profile',
+                          location: 'Gaborone / Regional Hub',
+                        },
+                        description: idea.title,
+                        sector: 'AgriTech & Food',
+                        fundingRequested: idea.capitalAsk || 750000,
+                        coFinancing: Math.round((idea.capitalAsk || 750000) * 0.15),
+                        projectedJobs: 8,
+                        projectedAnnualRevenue: Math.round((idea.capitalAsk || 750000) * 1.5),
+                        riskRating: 'LOW',
+                        stageProgress: idea.progress ?? 50,
+                        submittedDate: idea.arrivalDate || 'Today',
+                        lastUpdated: 'Just now',
+                        cipaNumber: idea.cipaUin,
+                        bursTin: idea.bursTin,
+                        screening: idea.screening,
+                        reviewers: [],
+                        milestones: [],
+                        tags: [idea.category || 'General'],
+                        auditLog: [],
+                      };
+                      if (isAdjudicator) {
+                        setAdjudicatingProject(syntheticProj);
+                      } else {
+                        setEvaluatingProject(syntheticProj);
+                      }
                     }}
                   />
                 ) : (
@@ -4891,7 +5268,7 @@ function MainAppContent() {
                     personnel={personnel}
                     workflowCycle={activeWorkflowCycle}
                     applicationFields={applicationFields}
-                    queueIdeas={isEvaluator ? evaluatorAssignedIdeas : queueIdeas}
+                    queueIdeas={isEvaluator || isAdjudicator ? evaluatorAssignedIdeas : queueIdeas}
                     canvasStations={canvasStations}
                     canvasPools={canvasPools}
                     assignedIdeasMap={assignedIdeasMap}
@@ -4995,6 +5372,14 @@ function MainAppContent() {
                     onPoolCustomPositionsChange={setPoolCustomPositions}
                     messageCustomPositions={messageCustomPositions}
                     onMessageCustomPositionsChange={setMessageCustomPositions}
+                    cardCustomDimensions={cardCustomDimensions}
+                    onCardCustomDimensionsChange={setCardCustomDimensions}
+                    queueDimensions={queueDimensions}
+                    onQueueDimensionsChange={setQueueDimensions}
+                    isQueueCollapsed={isQueueCollapsed}
+                    onIsQueueCollapsedChange={setIsQueueCollapsed}
+                    queueTab={queueTab}
+                    onQueueTabChange={setQueueTab}
                     onReassignIdeaBetweenStations={handleReassignIdeaBetweenStations}
                     onOpenShareWorkspace={() => setIsShareWorkspaceOpen(true)}
                     activeWorkspaceName={activeWorkspaceName}
@@ -5034,7 +5419,10 @@ function MainAppContent() {
                             : proj.auditLog,
                         });
                       } else {
-                        const idea = assignedIdeasMap[ideaId] || queueIdeas.find((i) => i.id === ideaId);
+                        const idea =
+                          assignedIdeasMap[ideaId] ||
+                          queueIdeas.find((i) => i.id === ideaId) ||
+                          syncedAdjudicationIdeas.find((i) => String(i.id) === String(ideaId));
                         if (idea) {
                           const lifecycle = getLifecycleRecordForIdea({
                             id: idea.id,
@@ -5587,7 +5975,16 @@ function MainAppContent() {
         innovation={adjudicatingProject}
         isOpen={!!adjudicatingProject}
         onClose={() => setAdjudicatingProject(null)}
-        onAdjudicationComplete={refreshFromBackend}
+        onAdjudicationComplete={async (decision) => {
+          if (
+            adjudicatingProject?.id &&
+            decision &&
+            decision.toLowerCase().includes('approved')
+          ) {
+            await handleAdvanceIdeaStage(String(adjudicatingProject.id));
+          }
+          refreshFromBackend();
+        }}
       />
 
       {/* Administrator Governance Console */}

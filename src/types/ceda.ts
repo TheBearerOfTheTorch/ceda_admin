@@ -199,6 +199,7 @@ export interface SubmitterEnquiryMessage {
   status: 'in_queue' | 'queued' | 'assigned' | 'resolved';
   assignedAgentId?: number;
   assignedAgentName?: string;
+  assignedAgentEmail?: string;
   priority: 'Normal' | 'Urgent' | 'High';
   slaMinutesRemaining: number;
   thread: {

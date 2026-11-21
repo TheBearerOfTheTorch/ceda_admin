@@ -12,6 +12,7 @@ interface EvaluatorAssignedSidebarProps {
   onToggle: () => void;
   onOpenInviteModal: () => void;
   onReviewIdea?: (idea: QueueIdeaItem) => void;
+  role?: string;
 }
 
 export const EvaluatorAssignedSidebar: React.FC<EvaluatorAssignedSidebarProps> = ({
@@ -20,7 +21,9 @@ export const EvaluatorAssignedSidebar: React.FC<EvaluatorAssignedSidebarProps> =
   onToggle,
   onOpenInviteModal,
   onReviewIdea,
+  role,
 }) => {
+  const isAdjudicator = role === 'Adjudicator';
   const [searchQuery, setSearchQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'urgent' | 'high_capital'>('all');
 
@@ -82,12 +85,16 @@ export const EvaluatorAssignedSidebar: React.FC<EvaluatorAssignedSidebarProps> =
           </div>
           <div>
             <div className="flex items-center gap-1.5 flex-wrap">
-              <h2 className="text-xs font-bold text-slate-900 tracking-tight">Assigned Evaluations</h2>
+              <h2 className="text-xs font-bold text-slate-900 tracking-tight">
+                {isAdjudicator ? 'Assigned Adjudications' : 'Assigned Evaluations'}
+              </h2>
               <span className="text-[10px] font-semibold bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full">
                 {assignedIdeas.length} Ideas
               </span>
             </div>
-            <p className="text-[11px] text-slate-500 leading-tight">Proposals in Your Technical Diligence</p>
+            <p className="text-[11px] text-slate-500 leading-tight">
+              {isAdjudicator ? 'Proposals in Your Board Queue' : 'Proposals in Your Technical Diligence'}
+            </p>
           </div>
         </div>
         <div className="flex items-center gap-1">

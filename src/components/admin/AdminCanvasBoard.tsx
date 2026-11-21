@@ -115,6 +115,14 @@ interface AdminCanvasBoardProps {
   onPoolCustomPositionsChange?: React.Dispatch<React.SetStateAction<Record<string, { x: number; y: number }>>>;
   messageCustomPositions?: Record<string, { x: number; y: number }>;
   onMessageCustomPositionsChange?: React.Dispatch<React.SetStateAction<Record<string, { x: number; y: number }>>>;
+  cardCustomDimensions?: Record<string, { width: number; height: number }>;
+  onCardCustomDimensionsChange?: React.Dispatch<React.SetStateAction<Record<string, { width: number; height: number }>>>;
+  queueDimensions?: { width: number; height: number };
+  onQueueDimensionsChange?: React.Dispatch<React.SetStateAction<{ width: number; height: number }>>;
+  isQueueCollapsed?: boolean;
+  onIsQueueCollapsedChange?: React.Dispatch<React.SetStateAction<boolean>>;
+  queueTab?: 'ideas' | 'messages' | 'adjudication';
+  onQueueTabChange?: React.Dispatch<React.SetStateAction<'ideas' | 'messages' | 'adjudication'>>;
   slaWarningDays?: number;
   slaCriticalDays?: number;
   // Evaluator & Card Interactive Actions
@@ -204,6 +212,14 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
   onPoolCustomPositionsChange,
   messageCustomPositions: propMessageCustomPositions,
   onMessageCustomPositionsChange,
+  cardCustomDimensions: propCardCustomDimensions,
+  onCardCustomDimensionsChange,
+  queueDimensions: propQueueDimensions,
+  onQueueDimensionsChange,
+  isQueueCollapsed: propIsQueueCollapsed,
+  onIsQueueCollapsedChange,
+  queueTab: propQueueTab,
+  onQueueTabChange,
   slaWarningDays = 3.0,
   slaCriticalDays = 1.5,
   onAddUserToCanvas,
@@ -222,7 +238,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
   onOpenClarificationChat,
   onAdvanceIdeaStage,
   onRemoveIdeaFromCanvas,
-  adjudicationIdeas: propAdjudicationIdeas = [],
+  adjudicationIdeas: propAdjudicationIdeas,
   enforceStatutoryGate = true,
   onToggleEnforceStatutoryGate,
   autoScreenOnIngest = false,
@@ -236,16 +252,17 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
   const isAdmin = currentUser?.role === 'Administrator';
   const isEvaluator = currentUser?.role === 'Evaluator';
   const isAdjudicator = currentUser?.role === 'Adjudicator';
+  const isReviewerWorkspace = isEvaluator || isAdjudicator;
   const isAgent = currentUser?.role === 'Agent';
   const canViewEnquiries = isAdmin || isAgent;
 
   const workspaceTitle = isEvaluator
     ? 'Evaluator Workspace'
     : isAdjudicator
-    ? 'Adjudicator Workspace'
-    : isAgent
-    ? 'Agent Workspace'
-    : 'Administration Workspace';
+      ? 'Adjudicator Workspace'
+      : isAgent
+        ? 'Agent Workspace'
+        : 'Administration Workspace';
 
   const containerRef = useRef<HTMLDivElement>(null);
   const queueScrollRef = useRef<HTMLDivElement>(null);
@@ -254,9 +271,11 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
   const [startPan, setStartPan] = useState({ x: 0, y: 0 });
 
   // Triple-track Queue View: Ideas Queue vs Citizen Enquiry Messages vs Adjudication Queue
-  const [queueTab, setQueueTab] = useState<'ideas' | 'messages' | 'adjudication'>(() => savedLayout.queueTab ?? 'ideas');
+  const [localQueueTab, setLocalQueueTab] = useState<'ideas' | 'messages' | 'adjudication'>(() => savedLayout.queueTab ?? 'ideas');
+  const queueTab = propQueueTab ?? localQueueTab;
+  const setQueueTab = onQueueTabChange ?? setLocalQueueTab;
 
-  // Evaluator Canvas Active Dropped Ideas
+  // Evaluator / Adjudicator Canvas Active Dropped Ideas
   const [evaluatorCanvasIdeaIds, setEvaluatorCanvasIdeaIds] = useState<string[]>(
     () => savedLayout.evaluatorCanvasIdeaIds ?? []
   );
@@ -287,27 +306,33 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
 
   // Synchronize Adjudication Ideas list
   const adjudicationIdeas = useMemo(() => {
-    if (propAdjudicationIdeas && propAdjudicationIdeas.length > 0) return propAdjudicationIdeas;
+    if (propAdjudicationIdeas !== undefined) return propAdjudicationIdeas;
     return Object.values(assignedIdeasMap).filter(
       (idea) => idea.status === 'completed' || (idea as any).stage === 'adjudication' || (idea as any).stageId === 'approval_board'
     );
   }, [propAdjudicationIdeas, assignedIdeasMap]);
 
   // Horizontal Queue minimization toggle (persisted across reloads)
-  const [isQueueCollapsed, setIsQueueCollapsed] = useState<boolean>(
+  const [localIsQueueCollapsed, setLocalIsQueueCollapsed] = useState<boolean>(
     () => savedLayout.isQueueCollapsed ?? false
   );
+  const isQueueCollapsed = propIsQueueCollapsed ?? localIsQueueCollapsed;
+  const setIsQueueCollapsed = onIsQueueCollapsedChange ?? setLocalIsQueueCollapsed;
   const [saveFeedback, setSaveFeedback] = useState<'idle' | 'saving' | 'saved'>('idle');
 
   // Card custom dimensions (resizable cards)
-  const [cardCustomDimensions, setCardCustomDimensions] = useState<Record<string, { width: number; height: number }>>(
+  const [localCardCustomDimensions, setLocalCardCustomDimensions] = useState<Record<string, { width: number; height: number }>>(
     () => savedLayout.cardCustomDimensions ?? {}
   );
+  const cardCustomDimensions = propCardCustomDimensions ?? localCardCustomDimensions;
+  const setCardCustomDimensions = onCardCustomDimensionsChange ?? setLocalCardCustomDimensions;
 
   // Queue custom dimensions (resizable horizontal queue)
-  const [queueDimensions, setQueueDimensions] = useState<{ width: number; height: number }>(
+  const [localQueueDimensions, setLocalQueueDimensions] = useState<{ width: number; height: number }>(
     () => savedLayout.queueDimensions ?? { width: 1280, height: 230 }
   );
+  const queueDimensions = propQueueDimensions ?? localQueueDimensions;
+  const setQueueDimensions = onQueueDimensionsChange ?? setLocalQueueDimensions;
 
   // Active resizing state
   const [resizingEntity, setResizingEntity] = useState<{
@@ -426,12 +451,15 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
     }
   }, [evaluatorCanvasIdeaIds, ideaCustomPositions]);
 
-  // Subscribe to real-time clarification comments for ideas active on Evaluator canvas
+  // Subscribe to real-time clarification comments for ideas active on Evaluator / Adjudicator canvas
   useEffect(() => {
-    if (!isEvaluator || evaluatorCanvasIdeaIds.length === 0) return;
+    if (!isReviewerWorkspace || evaluatorCanvasIdeaIds.length === 0) return;
 
     const unsubs = evaluatorCanvasIdeaIds.map((id) => {
-      const matchedIdea = assignedIdeasMap[id] || queueIdeas.find((i) => i.id === id);
+      const matchedIdea =
+        assignedIdeasMap[id] ||
+        queueIdeas.find((i) => i.id === id) ||
+        adjudicationIdeas.find((a) => a.id === id);
       return subscribeToClarificationChat(
         id,
         (msgs) => {
@@ -447,7 +475,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
     return () => {
       unsubs.forEach((u) => u?.());
     };
-  }, [isEvaluator, evaluatorCanvasIdeaIds, assignedIdeasMap, queueIdeas]);
+  }, [isReviewerWorkspace, evaluatorCanvasIdeaIds, assignedIdeasMap, queueIdeas, adjudicationIdeas]);
 
   const latestLayoutRef = useRef<PersistedAdminLayout>({});
   const hasInteractedWithLayoutRef = useRef(false);
@@ -734,32 +762,49 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
   );
 
   const standaloneCanvasIdeas = useMemo(() => {
-    if (isEvaluator) return [];
+    if (isReviewerWorkspace) return [];
     return Object.keys(ideaCustomPositions)
       .filter((id) => !id.includes('__') && !allStationAssignedIdeaIds.has(id))
       .map((id) => {
         return (
           queueIdeas.find((i) => i.id === id) ||
           assignedIdeasMap[id] ||
+          adjudicationIdeas.find((a) => a.id === id) ||
           null
         );
       })
       .filter(Boolean) as QueueIdeaItem[];
-  }, [isEvaluator, ideaCustomPositions, allStationAssignedIdeaIds, queueIdeas, assignedIdeasMap]);
+  }, [isReviewerWorkspace, ideaCustomPositions, allStationAssignedIdeaIds, queueIdeas, assignedIdeasMap, adjudicationIdeas]);
 
   const evaluatorCanvasIdeas = useMemo(() => {
-    const promotedAdjIds = new Set(adjudicationIdeas.map((a) => String(a.id)));
+    const promotedAdjIds = isAdjudicator
+      ? new Set<string>()
+      : new Set(adjudicationIdeas.map((a) => String(a.id)));
     return evaluatorCanvasIdeaIds
       .filter((id) => !promotedAdjIds.has(String(id)))
-      .map((id) => queueIdeas.find((i) => i.id === id) || assignedIdeasMap[id])
-      .filter((item): item is QueueIdeaItem => Boolean(item && item.status !== 'completed'));
-  }, [evaluatorCanvasIdeaIds, queueIdeas, assignedIdeasMap, adjudicationIdeas]);
+      .map(
+        (id) =>
+          queueIdeas.find((i) => i.id === id) ||
+          assignedIdeasMap[id] ||
+          adjudicationIdeas.find((a) => a.id === id)
+      )
+      .filter((item): item is QueueIdeaItem => {
+        if (!item) return false;
+        if (isAdjudicator) {
+          return (item.status as string) !== 'adjudicated' && (item as any).stageId !== 'pilot_phase';
+        }
+        return item.status !== 'completed' && (item.status as string) !== 'adjudicated';
+      });
+  }, [isAdjudicator, evaluatorCanvasIdeaIds, queueIdeas, assignedIdeasMap, adjudicationIdeas]);
 
   const handleSendInlineComment = async (ideaId: string) => {
     const text = inlineCommentInput[ideaId];
     if (!text || !text.trim()) return;
 
-    const matchedIdea = assignedIdeasMap[ideaId] || queueIdeas.find((i) => i.id === ideaId);
+    const matchedIdea =
+      assignedIdeasMap[ideaId] ||
+      queueIdeas.find((i) => i.id === ideaId) ||
+      adjudicationIdeas.find((a) => a.id === ideaId);
     const senderName = currentUser ? `${currentUser.firstName} ${currentUser.lastName}`.trim() : 'Evaluator';
     const senderRole = currentUser?.role || 'Evaluator';
     const trimmed = text.trim();
@@ -780,7 +825,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
       message: `${senderName} (${senderRole}) sent a clarity message${matchedIdea?.title ? ` on "${matchedIdea.title}"` : ''}: "${trimmed.slice(0, 80)}${trimmed.length > 80 ? '...' : ''}"`,
       user: senderName,
       targetRole: 'Submitter',
-    }).catch(() => {});
+    }).catch(() => { });
 
     setInlineCommentInput((prev) => ({ ...prev, [ideaId]: '' }));
   };
@@ -807,7 +852,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
       message: `${senderName} requested ${docLabel}${matchedIdea?.title ? ` for "${matchedIdea.title}"` : ''}.`,
       user: senderName,
       targetRole: 'Submitter',
-    }).catch(() => {});
+    }).catch(() => { });
   };
 
   // Helper to determine exact position of connected message card
@@ -972,7 +1017,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
           setSelectedQueueIdeaIds([]);
           setHoveredStationId(null);
           setActiveDropStationId(null);
-        } else if (queuePointerDrag.isDragging && isEvaluator && containerRef.current) {
+        } else if (queuePointerDrag.isDragging && isReviewerWorkspace && containerRef.current) {
           setEvaluatorCanvasIdeaIds((prev) => Array.from(new Set([...prev, ...queuePointerDrag.ideaIds])));
           setIdeaCustomPositions((prev) => {
             const next = { ...prev };
@@ -1520,7 +1565,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
       if (rawData) {
         try {
           parsed = JSON.parse(rawData);
-        } catch {}
+        } catch { }
       }
 
       if (parsed?.type === 'user') {
@@ -1552,7 +1597,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
       }
 
       if (ideaIds.length > 0) {
-        if (isEvaluator) {
+        if (isReviewerWorkspace) {
           setEvaluatorCanvasIdeaIds((prev) => Array.from(new Set([...prev, ...ideaIds])));
           setIdeaCustomPositions((prev) => {
             const next = { ...prev };
@@ -1654,12 +1699,13 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
 
   // Direct Click to Assign helper
   const handleDirectAssignToStation = (stationId: string, specificIdeaId?: string) => {
+    const activePool = queueTab === 'adjudication' && adjudicationIdeas.length > 0 ? adjudicationIdeas : queueIdeas;
     const idsToAssign = specificIdeaId
       ? [specificIdeaId]
       : selectedQueueIdeaIds.length > 0
         ? selectedQueueIdeaIds
-        : queueIdeas.length > 0
-          ? [queueIdeas[0].id]
+        : activePool.length > 0
+          ? [activePool[0].id]
           : [];
 
     if (idsToAssign.length > 0) {
@@ -1710,26 +1756,14 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
             {workspaceTitle}
           </span>
           <span className="text-slate-300">•</span>
-          <button
-            type="button"
-            onClick={() => setIsQueueCollapsed((prev) => !prev)}
-            className="text-[#006194] hover:text-[#004f7a] bg-sky-50 hover:bg-sky-100 border border-sky-200 px-2 py-0.5 rounded font-mono-code text-[11px] font-bold cursor-pointer transition-colors flex items-center gap-1"
-            title={isQueueCollapsed ? "Click to expand Horizontal Queue" : "Click to minimize Horizontal Queue"}
-          >
-            <span>HORIZONTAL QUEUE: {queueIdeas.length} IDEAS</span>
-            {isQueueCollapsed ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
-          </button>
+
           {newIdeaPulse && (
             <span className="text-[10px] font-extrabold text-amber-800 bg-amber-100 border border-amber-300 px-2 py-0.5 rounded-full animate-bounce flex items-center gap-1">
               <Flame className="w-3 h-3 text-amber-600" />
               +1 Ingest Stream Arrived!
             </span>
           )}
-          {selectedGroupCardIds.length > 0 && (
-            <span className="text-[10px] font-bold text-sky-800 bg-sky-100 border border-sky-300 px-2 py-0.5 rounded-full">
-              📦 Group Selected: {selectedGroupCardIds.length} cards
-            </span>
-          )}
+
           {workspaceCollaborators.length > 0 && (
             <button
               type="button"
@@ -1761,36 +1795,8 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
           {/* Admin Simulation and Orchestration Controls */}
           {isAdmin && (
             <>
-              {/* Simulate Live Ingest Pulse Button */}
-              <button
-                onClick={() => {
-                  onIngestNewLiveIdea();
-                  triggerPulse();
-                }}
-                className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 font-bold text-[11px] transition-all shadow-2xs active:scale-95"
-                title="Simulate a citizen entrepreneur submitting a new idea right now"
-              >
-                <Sparkles className="w-3.5 h-3.5 text-amber-600" />
-                <span>Simulate Ingest (+1)</span>
-              </button>
 
-              {/* Simulate New Citizen Enquiry Message Button */}
-              {onSimulateNewMessage && (
-                <button
-                  onClick={() => {
-                    onSimulateNewMessage();
-                    setQueueTab('messages');
-                    triggerPulse();
-                  }}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-teal-50 hover:bg-teal-100 text-teal-900 border border-teal-200 font-bold text-[11px] transition-all shadow-2xs active:scale-95 cursor-pointer"
-                  title="Simulate a new citizen enquiry entering the Admin Queue"
-                >
-                  <Headphones className="w-3.5 h-3.5 text-teal-600" />
-                  <span>Simulate Enquiry (+1)</span>
-                </button>
-              )}
-
-              {/* Auto-Ingest Simulator Toggle */}
+              {/* Auto-Ingest Siator Toggle */}
               <button
                 onClick={() => setIsAutoIngestRunning(!isAutoIngestRunning)}
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded-md font-bold text-[11px] transition-colors border ${isAutoIngestRunning
@@ -1800,7 +1806,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                 title="Toggle simulated real-time stream of incoming citizen ideas every 12 seconds"
               >
                 {isAutoIngestRunning ? <Pause className="w-3 h-3 text-emerald-600" /> : <Play className="w-3 h-3 text-slate-500" />}
-                <span>Auto Stream: {isAutoIngestRunning ? 'ON' : 'OFF'}</span>
+                <span>Stream: {isAutoIngestRunning ? 'ON' : 'OFF'}</span>
               </button>
 
               {/* Workflow Architect */}
@@ -1857,11 +1863,10 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
             type="button"
             onClick={handleSaveCanvasChanges}
             disabled={saveFeedback === 'saving'}
-            className={`flex items-center gap-1 px-2.5 py-1 rounded-md font-bold text-[11px] transition-colors border cursor-pointer ${
-              saveFeedback === 'saved'
-                ? 'bg-emerald-600 text-white border-emerald-700'
-                : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
-            }`}
+            className={`flex items-center gap-1 px-2.5 py-1 rounded-md font-bold text-[11px] transition-colors border cursor-pointer ${saveFeedback === 'saved'
+              ? 'bg-emerald-600 text-white border-emerald-700'
+              : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border-emerald-200'
+              }`}
             title="Save workspace & canvas layout changes (⌘S / Ctrl+S)"
           >
             {saveFeedback === 'saved' ? (
@@ -2012,8 +2017,8 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                   </linearGradient>
                 </defs>
 
-                {/* Evaluator Diligence Wireframe Connectors: Idea -> Comments -> Approval Gate -> Adjudication */}
-                {isEvaluator && evaluatorCanvasIdeas.map((idea, rowIdx) => {
+                {/* Evaluator / Adjudicator Diligence Wireframe Connectors: Idea -> Comments -> Approval Gate -> Next Stage */}
+                {isReviewerWorkspace && evaluatorCanvasIdeas.map((idea, rowIdx) => {
                   const { basePos, commentsPos, gatePos, step2Pos } = getEvaluatorCardPositions(idea, rowIdx);
 
                   // Connectors connect center-right of previous card to center-left of next card
@@ -2046,7 +2051,9 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                   const dx3 = Math.max(25, Math.abs(end3X - start3X) * 0.45);
                   const p3 = `M ${start3X} ${start3Y} C ${start3X + dx3} ${start3Y}, ${end3X - dx3} ${end3Y}, ${end3X} ${end3Y}`;
 
-                  const isApproved = idea.status === 'completed' || adjudicationIdeas.some((i) => i.id === idea.id);
+                  const isApproved = isAdjudicator
+                    ? ((idea.status as string) === 'adjudicated' || (idea as any).stageId === 'pilot_phase')
+                    : (idea.status === 'completed' || adjudicationIdeas.some((i) => i.id === idea.id));
 
                   return (
                     <g key={`eval-wire-${idea.id}`}>
@@ -2060,7 +2067,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                       <circle cx={start2X} cy={start2Y} r="4.5" fill="#d97706" />
                       <circle cx={end2X} cy={end2Y} r="4.5" fill="#059669" />
 
-                      {/* Wire 3: Approval Gate -> Step 2 Adjudication */}
+                      {/* Wire 3: Approval Gate -> Step 2 */}
                       <path
                         d={p3}
                         fill="none"
@@ -2075,7 +2082,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                 })}
 
                 {/* Administrator / Agent Station Connectors */}
-                {!isEvaluator && canvasStations.map((station) => {
+                {!isReviewerWorkspace && canvasStations.map((station) => {
                   const userCardWidth = 256;
                   const userCardHeight = 175;
                   const userAnchorX = station.x + userCardWidth;
@@ -2288,11 +2295,10 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                             <button
                               type="button"
                               onClick={onToggleAutoScreenOnIngest}
-                              className={`flex items-center gap-1 text-[10.5px] font-bold px-2 py-1 rounded-lg border transition-all cursor-pointer ${
-                                autoScreenOnIngest
-                                  ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
-                                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
-                              }`}
+                              className={`flex items-center gap-1 text-[10.5px] font-bold px-2 py-1 rounded-lg border transition-all cursor-pointer ${autoScreenOnIngest
+                                ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                                : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-100'
+                                }`}
                               title="Automatically run CIPA & BURS screening whenever a new idea enters the queue"
                             >
                               <Zap className={`w-3 h-3 ${autoScreenOnIngest ? 'text-emerald-600' : 'text-slate-400'}`} />
@@ -2428,323 +2434,365 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                       className="p-3.5 flex flex-row gap-3 overflow-x-auto scrollbar-thin scroll-smooth select-none items-stretch"
                       style={{ scrollbarWidth: 'thin' }}
                     >
-                    {/* Track 1: IDEAS QUEUE */}
-                    {queueTab === 'ideas' && (
-                      sortedQueueIdeas.length === 0 ? (
-                        <div className="w-full py-6 text-center text-slate-400">
-                          <CheckCircle2 className="w-6 h-6 mx-auto mb-1 text-emerald-500" />
-                          <p className="text-xs font-bold text-slate-700">All incoming ideas assigned!</p>
-                        </div>
-                      ) : (
-                        sortedQueueIdeas.map((idea, index) => {
-                          const isSelected = selectedQueueIdeaIds.includes(idea.id);
+                      {/* Track 1: IDEAS QUEUE */}
+                      {queueTab === 'ideas' && (
+                        sortedQueueIdeas.length === 0 ? (
+                          <div className="w-full py-6 text-center text-slate-400">
+                            <CheckCircle2 className="w-6 h-6 mx-auto mb-1 text-emerald-500" />
+                            <p className="text-xs font-bold text-slate-700">All incoming ideas assigned!</p>
+                          </div>
+                        ) : (
+                          sortedQueueIdeas.map((idea, index) => {
+                            const isSelected = selectedQueueIdeaIds.includes(idea.id);
 
-                          return (
-                            <div
-                              key={idea.id}
-                              draggable={true}
-                              onMouseDown={(e) => handleQueueIdeaMouseDown(idea.id, e)}
-                              onDragStart={(e) => {
-                                const idsToDrag = selectedQueueIdeaIds.includes(idea.id)
-                                  ? selectedQueueIdeaIds
-                                  : [idea.id];
-                                setDraggedIdeaIds(idsToDrag);
-                                window.__ceda_dragged_ideas = idsToDrag;
+                            return (
+                              <div
+                                key={idea.id}
+                                draggable={true}
+                                onMouseDown={(e) => handleQueueIdeaMouseDown(idea.id, e)}
+                                onDragStart={(e) => {
+                                  const idsToDrag = selectedQueueIdeaIds.includes(idea.id)
+                                    ? selectedQueueIdeaIds
+                                    : [idea.id];
+                                  setDraggedIdeaIds(idsToDrag);
+                                  window.__ceda_dragged_ideas = idsToDrag;
 
-                                const payload = JSON.stringify({ type: 'ideas', ideaIds: idsToDrag });
-                                e.dataTransfer.setData('text/plain', payload);
-                                e.dataTransfer.setData('text', payload);
-                                e.dataTransfer.setData('application/json', payload);
-                                e.dataTransfer.effectAllowed = 'copyMove';
-                              }}
-                              onDragEnd={() => {
-                                setDraggedIdeaIds([]);
-                              }}
-                              onClick={() => toggleSelectIdea(idea.id)}
-                              className={`w-64 min-w-[256px] p-3 rounded-xl border flex flex-col justify-between transition-all cursor-grab active:cursor-grabbing select-none text-xs shrink-0 ${isSelected
-                                ? 'bg-sky-50/95 border-[#006194] ring-2 ring-[#006194]/40 shadow-md scale-102'
-                                : 'bg-white border-slate-200 hover:border-[#006194]/50 shadow-2xs hover:shadow-xs'
-                                }`}
-                            >
-                              {/* Top: Arrival Rank, Time Date Arrived & Code */}
-                              <div>
-                                <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
-                                  <div className="flex items-center gap-1.5">
-                                    <span className="font-mono-code font-bold text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded">
-                                      {idea.code}
-                                    </span>
-                                    <span className="text-[9px] font-bold text-slate-400">
-                                      #{index + 1} FIFO
+                                  const payload = JSON.stringify({ type: 'ideas', ideaIds: idsToDrag });
+                                  e.dataTransfer.setData('text/plain', payload);
+                                  e.dataTransfer.setData('text', payload);
+                                  e.dataTransfer.setData('application/json', payload);
+                                  e.dataTransfer.effectAllowed = 'copyMove';
+                                }}
+                                onDragEnd={() => {
+                                  setDraggedIdeaIds([]);
+                                }}
+                                onClick={() => toggleSelectIdea(idea.id)}
+                                className={`w-64 min-w-[256px] p-3 rounded-xl border flex flex-col justify-between transition-all cursor-grab active:cursor-grabbing select-none text-xs shrink-0 ${isSelected
+                                  ? 'bg-sky-50/95 border-[#006194] ring-2 ring-[#006194]/40 shadow-md scale-102'
+                                  : 'bg-white border-slate-200 hover:border-[#006194]/50 shadow-2xs hover:shadow-xs'
+                                  }`}
+                              >
+                                {/* Top: Arrival Rank, Time Date Arrived & Code */}
+                                <div>
+                                  <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="font-mono-code font-bold text-slate-700 bg-slate-100 px-1.5 py-0.2 rounded">
+                                        {idea.code}
+                                      </span>
+                                      <span className="text-[9px] font-bold text-slate-400">
+                                        #{index + 1} FIFO
+                                      </span>
+                                    </div>
+                                    <span className="flex items-center gap-1 font-semibold text-slate-500">
+                                      <Clock className="w-3 h-3 text-slate-400" />
+                                      {idea.arrivalDate}
                                     </span>
                                   </div>
-                                  <span className="flex items-center gap-1 font-semibold text-slate-500">
-                                    <Clock className="w-3 h-3 text-slate-400" />
-                                    {idea.arrivalDate}
-                                  </span>
-                                </div>
 
-                                {/* Idea Title */}
-                                <h4 className="font-bold text-slate-900 leading-snug line-clamp-2 mt-1">
-                                  {idea.title}
-                                </h4>
-                                {(idea.enterpriseName ||
-                                  (idea.screening?.cipaMatch?.companyName &&
-                                    idea.screening.cipaMatch.companyName !== 'No Registered Company / Entity Provided')) && (
-                                  <div className="text-[10px] font-semibold text-slate-600 truncate mt-0.5">
-                                    🏢 {idea.enterpriseName || idea.screening?.cipaMatch?.companyName}
-                                  </div>
-                                )}
-
-                                {/* Stage 2 Statutory Screening Status Badge & Manual Inspector Trigger (Admin Only) */}
-                                {isAdmin && (
-                                  <div className="mt-1.5 flex items-center justify-between gap-1.5">
-                                    {idea.screening?.status === 'verified' ? (
-                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200 truncate">
-                                        <span>🟢 CIPA + BURS Verified</span>
-                                      </span>
-                                    ) : idea.screening?.status === 'partial' ? (
-                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-amber-50 text-amber-800 border border-amber-200 truncate">
-                                        <span>🟡 Partial / Review Needed</span>
-                                      </span>
-                                    ) : idea.screening?.status === 'failed' ? (
-                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-rose-50 text-rose-700 border border-rose-200 truncate">
-                                        <span>🔴 Not Registered / Failed</span>
-                                      </span>
-                                    ) : idea.screening?.status === 'docs_requested' ? (
-                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-orange-50 text-orange-800 border border-orange-200 truncate">
-                                        <span>📩 Statutory Docs Req.</span>
-                                      </span>
-                                    ) : (
-                                      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-bold bg-slate-100 text-slate-500 border border-slate-200 truncate">
-                                        <span>Unscreened (Stage 2)</span>
-                                      </span>
+                                  {/* Idea Title */}
+                                  <h4 className="font-bold text-slate-900 leading-snug line-clamp-2 mt-1">
+                                    {idea.title}
+                                  </h4>
+                                  {(idea.enterpriseName ||
+                                    (idea.screening?.cipaMatch?.companyName &&
+                                      idea.screening.cipaMatch.companyName !== 'No Registered Company / Entity Provided')) && (
+                                      <div className="text-[10px] font-semibold text-slate-600 truncate mt-0.5">
+                                        🏢 {idea.enterpriseName || idea.screening?.cipaMatch?.companyName}
+                                      </div>
                                     )}
 
-                                    {onOpenStatutoryScreening && (
+                                  {/* Stage 2 Statutory Screening Status Badge & Manual Inspector Trigger (Admin Only) */}
+                                  {isAdmin && (
+                                    <div className="mt-1.5 flex items-center justify-between gap-1.5">
+                                      {idea.screening?.status === 'verified' ? (
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-emerald-50 text-emerald-700 border border-emerald-200 truncate">
+                                          <span>🟢 CIPA + BURS Verified</span>
+                                        </span>
+                                      ) : idea.screening?.status === 'partial' ? (
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-amber-50 text-amber-800 border border-amber-200 truncate">
+                                          <span>🟡 Partial / Review Needed</span>
+                                        </span>
+                                      ) : idea.screening?.status === 'failed' ? (
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-rose-50 text-rose-700 border border-rose-200 truncate">
+                                          <span>🔴 Not Registered / Failed</span>
+                                        </span>
+                                      ) : idea.screening?.status === 'docs_requested' ? (
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-extrabold bg-orange-50 text-orange-800 border border-orange-200 truncate">
+                                          <span>📩 Statutory Docs Req.</span>
+                                        </span>
+                                      ) : (
+                                        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[9.5px] font-bold bg-slate-100 text-slate-500 border border-slate-200 truncate">
+                                          <span>Unscreened (Stage 2)</span>
+                                        </span>
+                                      )}
+
+                                      {onOpenStatutoryScreening && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            onOpenStatutoryScreening(idea);
+                                          }}
+                                          className="px-1.5 py-0.5 rounded bg-purple-50 hover:bg-purple-600 text-purple-700 hover:text-white border border-purple-200 font-bold text-[9.5px] transition-colors shrink-0 cursor-pointer"
+                                          title="Open Stage 2 Statutory & Tax Screening Console (CIPA & BURS)"
+                                        >
+                                          Verify CIPA / BURS
+                                        </button>
+                                      )}
+                                    </div>
+                                  )}
+                                </div>
+
+                                {/* Footer: Category & Direct Assign Dropdown Shortcut */}
+                                <div className="pt-2 border-t border-slate-100 mt-2 flex items-center justify-between text-[10px]">
+                                  <span className="text-slate-500 font-medium truncate max-w-[110px]">
+                                    {idea.category}
+                                  </span>
+
+                                  <div className="flex items-center gap-1">
+                                    <span
+                                      className={`font-extrabold px-1.5 py-0.2 rounded border ${idea.urgency === 'Fast-Track'
+                                        ? 'bg-rose-50 text-rose-700 border-rose-200'
+                                        : idea.urgency === 'Priority'
+                                          ? 'bg-amber-50 text-amber-700 border-amber-200'
+                                          : 'bg-slate-100 text-slate-600 border-slate-200'
+                                        }`}
+                                    >
+                                      {idea.urgency}
+                                    </span>
+
+                                    {isAdmin && canvasStations.length > 0 && (
+                                      <button
+                                        onClick={(e) => {
+                                          e.preventDefault();
+                                          e.stopPropagation();
+                                          handleDirectAssignToStation(canvasStations[0].id, idea.id);
+                                        }}
+                                        title={
+                                          enforceStatutoryGate && idea.screening?.status !== 'verified'
+                                            ? 'Blocked: Must pass Stage 2 CIPA & BURS Statutory Screening first (or toggle in Settings)'
+                                            : `Assign directly to ${canvasStations[0].user.name}`
+                                        }
+                                        className={`px-2 py-0.5 rounded font-bold text-[10px] transition-colors shadow-2xs cursor-pointer ${enforceStatutoryGate && idea.screening?.status !== 'verified'
+                                          ? 'bg-slate-100 text-slate-400 border border-slate-200 hover:bg-rose-50 hover:text-rose-700'
+                                          : 'bg-sky-100 hover:bg-[#006194] text-[#006194] hover:text-white'
+                                          }`}
+                                      >
+                                        {enforceStatutoryGate && idea.screening?.status !== 'verified'
+                                          ? '🔒 Assign'
+                                          : '→ Assign'}
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )
+                      )}
+
+                      {/* Track 2: CITIZEN ENQUIRY MESSAGES QUEUE (FIFO: Oldest Left, Newest Right) */}
+                      {queueTab === 'messages' && (
+                        queuedMessages.length === 0 ? (
+                          <div className="w-full py-6 text-center text-slate-400">
+                            <CheckCircle2 className="w-6 h-6 mx-auto mb-1 text-teal-500" />
+                            <p className="text-xs font-bold text-slate-700">Admin Message Queue is clear!</p>
+                            <p className="text-[10.5px] text-slate-400 mt-0.5">
+                              {autoDispatchEnabled
+                                ? 'Auto-dispatch is ON — new enquiries route automatically to available agents'
+                                : 'Click "+1 Message" or "Simulate Enquiry (+1)" to test incoming citizen enquiries'}
+                            </p>
+                          </div>
+                        ) : (
+                          queuedMessages.map((msg, index) => {
+                            const isMsgSelected = selectedQueueMessageIds.includes(msg.id);
+                            return (
+                              <div
+                                key={msg.id}
+                                onMouseDown={(e) => handleQueueMessageMouseDown(msg.id, e)}
+                                onClick={() => toggleSelectQueueMessage(msg.id)}
+                                className={`w-72 min-w-[288px] p-3 rounded-xl border flex flex-col justify-between transition-all shrink-0 text-xs cursor-grab active:cursor-grabbing select-none ${isMsgSelected
+                                  ? 'bg-teal-50/90 border-teal-600 ring-2 ring-teal-500/40 shadow-md'
+                                  : 'border-teal-200 bg-white hover:border-teal-400 shadow-2xs hover:shadow-xs'
+                                  }`}
+                              >
+                                <div>
+                                  {/* Header: Submitter info and FIFO Rank */}
+                                  <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1.5">
+                                    <span className="font-extrabold text-teal-900 bg-teal-50 border border-teal-200 px-1.5 py-0.2 rounded">
+                                      #{index + 1} in Admin Queue
+                                    </span>
+                                    <span className="flex items-center gap-1 font-semibold text-slate-500">
+                                      <Clock className="w-3 h-3 text-slate-400" />
+                                      {msg.arrivalTime}
+                                    </span>
+                                  </div>
+
+                                  <div className="flex items-center gap-2 mb-1">
+                                    <div className="w-6 h-6 rounded-full bg-teal-600 text-white font-black text-[10px] flex items-center justify-center shrink-0">
+                                      {msg.submitterName.split(' ').map(n => n[0]).join('')}
+                                    </div>
+                                    <div className="truncate">
+                                      <h4 className="font-bold text-slate-900 text-xs truncate">
+                                        {msg.submitterName}
+                                      </h4>
+                                      <span className="text-[9.5px] text-slate-400 truncate block">
+                                        {msg.submitterLocation}
+                                      </span>
+                                    </div>
+                                  </div>
+
+                                  {/* Subject & Snippet */}
+                                  <h5 className="font-bold text-slate-800 text-[11px] mt-1 line-clamp-1">
+                                    {msg.subject}
+                                  </h5>
+                                  <p className="text-[10.5px] text-slate-600 line-clamp-2 mt-0.5 leading-snug">
+                                    {msg.messageText}
+                                  </p>
+
+                                  {msg.ideaCode && (
+                                    <span className="inline-block mt-1 font-mono-code text-[9.5px] font-bold text-sky-800 bg-sky-50 border border-sky-200 px-1.5 py-0.2 rounded">
+                                      Ref: {msg.ideaCode}
+                                    </span>
+                                  )}
+                                </div>
+
+                                {/* Footer: Quick Assign to Available Agents (or Drag to Agent Station) */}
+                                <div className="pt-2 border-t border-slate-100 mt-2 flex items-center justify-between text-[10px]">
+                                  <span className={`font-extrabold px-1.5 py-0.2 rounded border ${msg.priority === 'Urgent' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-slate-100 text-slate-600 border-slate-200'
+                                    }`}>
+                                    {msg.priority}
+                                  </span>
+
+                                  <div className="flex items-center gap-1">
+                                    {availableAgents.length === 0 ? (
+                                      <span className="text-[9.5px] text-amber-700 font-bold">No Agents Free</span>
+                                    ) : (
+                                      availableAgents.slice(0, 2).map((agent) => (
+                                        <button
+                                          key={agent.id}
+                                          onClick={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            onAssignMessageToAgent?.(msg.id, agent.id);
+                                          }}
+                                          title={`Assign enquiry to ${agent.name}`}
+                                          className="px-2 py-0.5 bg-teal-50 hover:bg-teal-600 text-teal-800 hover:text-white rounded font-bold text-[10px] border border-teal-200 transition-colors shadow-2xs cursor-pointer"
+                                        >
+                                          → {agent.name.split(' ')[0]}
+                                        </button>
+                                      ))
+                                    )}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          })
+                        )
+                      )}
+
+                      {/* Track 3: ADJUDICATION QUEUE (Accessible to Admin, Evaluators & Adjudicators) */}
+                      {queueTab === 'adjudication' && (
+                        adjudicationIdeas.length === 0 ? (
+                          <div className="w-full py-6 text-center text-slate-400">
+                            <Award className="w-6 h-6 mx-auto mb-1 text-purple-400" />
+                            <p className="text-xs font-bold text-slate-700">Adjudication Queue is clear</p>
+                            <p className="text-[10.5px] text-slate-400 mt-0.5">
+                              Proposals approved through technical evaluation will stream here for board review.
+                            </p>
+                          </div>
+                        ) : (
+                          adjudicationIdeas.map((idea) => {
+                            const isSelected = selectedQueueIdeaIds.includes(idea.id);
+                            const targetAdjStation =
+                              canvasStations.find((s) => s.user.role === 'Adjudicator') || canvasStations[0];
+                            return (
+                              <div
+                                key={`adj-card-${idea.id}`}
+                                draggable={true}
+                                onMouseDown={(e) => handleQueueIdeaMouseDown(idea.id, e)}
+                                onDragStart={(e) => {
+                                  const idsToDrag = selectedQueueIdeaIds.includes(idea.id)
+                                    ? selectedQueueIdeaIds
+                                    : [idea.id];
+                                  setDraggedIdeaIds(idsToDrag);
+                                  window.__ceda_dragged_ideas = idsToDrag;
+
+                                  const payload = JSON.stringify({ type: 'ideas', ideaIds: idsToDrag });
+                                  e.dataTransfer.setData('text/plain', payload);
+                                  e.dataTransfer.setData('text', payload);
+                                  e.dataTransfer.setData('application/json', payload);
+                                  e.dataTransfer.effectAllowed = 'copyMove';
+                                }}
+                                onDragEnd={() => {
+                                  setDraggedIdeaIds([]);
+                                }}
+                                onClick={() => toggleSelectIdea(idea.id)}
+                                className={`w-72 min-w-[288px] p-3 rounded-xl border flex flex-col justify-between shrink-0 transition-all cursor-grab active:cursor-grabbing select-none text-xs ${isSelected
+                                  ? 'bg-purple-100/80 border-purple-600 ring-2 ring-purple-500/40 shadow-md scale-102'
+                                  : 'border-purple-200 bg-purple-50/40 hover:border-purple-400 shadow-2xs hover:shadow-xs'
+                                  }`}
+                              >
+                                <div>
+                                  <div className="flex items-center justify-between text-[10px] mb-1">
+                                    <span className="font-mono-code font-bold text-purple-900 bg-purple-100 px-1.5 py-0.2 rounded border border-purple-200">
+                                      {idea.code || idea.id}
+                                    </span>
+                                    <span className="text-purple-700 font-extrabold bg-purple-100/90 border border-purple-200 px-2 py-0.5 rounded-full flex items-center gap-1 text-[9.5px]">
+                                      <CheckCircle2 className="w-3 h-3 text-purple-600" />
+                                      Ready for Board
+                                    </span>
+                                  </div>
+                                  <h4 className="font-bold text-slate-900 leading-snug line-clamp-2 mt-1">
+                                    {idea.title}
+                                  </h4>
+                                  <p className="text-[11px] text-slate-500 mt-0.5 truncate">
+                                    {idea.enterpriseName || idea.submitterName || 'Promoter Profile'}
+                                  </p>
+                                </div>
+                                <div className="pt-2 border-t border-purple-100 mt-2 flex items-center justify-between gap-1.5 text-[10.5px]">
+                                  <div>
+                                    <span className="text-slate-400 text-[9.5px] block">Capital Demand</span>
+                                    <span className="font-mono-code font-bold text-slate-800">
+                                      {new Intl.NumberFormat('en-BW', { style: 'currency', currency: 'BWP', maximumFractionDigits: 0 }).format(idea.capitalAsk || 0)}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        onOpenDossier?.(idea.id);
+                                      }}
+                                      className="px-2 py-1 bg-white hover:bg-purple-50 text-purple-800 border border-purple-200 rounded-md font-bold text-[10px] transition-colors cursor-pointer flex items-center gap-1"
+                                    >
+                                      <FileText className="w-3 h-3" />
+                                      <span>Dossier</span>
+                                    </button>
+                                    {isAdmin && targetAdjStation && (
                                       <button
                                         type="button"
                                         onClick={(e) => {
                                           e.preventDefault();
                                           e.stopPropagation();
-                                          onOpenStatutoryScreening(idea);
+                                          handleDirectAssignToStation(targetAdjStation.id, idea.id);
                                         }}
-                                        className="px-1.5 py-0.5 rounded bg-purple-50 hover:bg-purple-600 text-purple-700 hover:text-white border border-purple-200 font-bold text-[9.5px] transition-colors shrink-0 cursor-pointer"
-                                        title="Open Stage 2 Statutory & Tax Screening Console (CIPA & BURS)"
+                                        title={`Assign directly to ${targetAdjStation.user.name} (${targetAdjStation.user.role})`}
+                                        className="px-2 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-md font-bold text-[10px] transition-colors shadow-2xs cursor-pointer"
                                       >
-                                        Verify CIPA / BURS
+                                        → Assign
                                       </button>
                                     )}
                                   </div>
-                                )}
-                              </div>
-
-                              {/* Footer: Category & Direct Assign Dropdown Shortcut */}
-                              <div className="pt-2 border-t border-slate-100 mt-2 flex items-center justify-between text-[10px]">
-                                <span className="text-slate-500 font-medium truncate max-w-[110px]">
-                                  {idea.category}
-                                </span>
-
-                                <div className="flex items-center gap-1">
-                                  <span
-                                    className={`font-extrabold px-1.5 py-0.2 rounded border ${idea.urgency === 'Fast-Track'
-                                      ? 'bg-rose-50 text-rose-700 border-rose-200'
-                                      : idea.urgency === 'Priority'
-                                        ? 'bg-amber-50 text-amber-700 border-amber-200'
-                                        : 'bg-slate-100 text-slate-600 border-slate-200'
-                                      }`}
-                                  >
-                                    {idea.urgency}
-                                  </span>
-
-                                  {isAdmin && canvasStations.length > 0 && (
-                                    <button
-                                      onClick={(e) => {
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        handleDirectAssignToStation(canvasStations[0].id, idea.id);
-                                      }}
-                                      title={
-                                        enforceStatutoryGate && idea.screening?.status !== 'verified'
-                                          ? 'Blocked: Must pass Stage 2 CIPA & BURS Statutory Screening first (or toggle in Settings)'
-                                          : `Assign directly to ${canvasStations[0].user.name}`
-                                      }
-                                      className={`px-2 py-0.5 rounded font-bold text-[10px] transition-colors shadow-2xs cursor-pointer ${
-                                        enforceStatutoryGate && idea.screening?.status !== 'verified'
-                                          ? 'bg-slate-100 text-slate-400 border border-slate-200 hover:bg-rose-50 hover:text-rose-700'
-                                          : 'bg-sky-100 hover:bg-[#006194] text-[#006194] hover:text-white'
-                                      }`}
-                                    >
-                                      {enforceStatutoryGate && idea.screening?.status !== 'verified'
-                                        ? '🔒 Assign'
-                                        : '→ Assign'}
-                                    </button>
-                                  )}
                                 </div>
                               </div>
-                            </div>
-                          );
-                        })
-                      )
-                    )}
-
-                    {/* Track 2: CITIZEN ENQUIRY MESSAGES QUEUE (FIFO: Oldest Left, Newest Right) */}
-                    {queueTab === 'messages' && (
-                      queuedMessages.length === 0 ? (
-                        <div className="w-full py-6 text-center text-slate-400">
-                          <CheckCircle2 className="w-6 h-6 mx-auto mb-1 text-teal-500" />
-                          <p className="text-xs font-bold text-slate-700">Admin Message Queue is clear!</p>
-                          <p className="text-[10.5px] text-slate-400 mt-0.5">
-                            {autoDispatchEnabled
-                              ? 'Auto-dispatch is ON — new enquiries route automatically to available agents'
-                              : 'Click "+1 Message" or "Simulate Enquiry (+1)" to test incoming citizen enquiries'}
-                          </p>
-                        </div>
-                      ) : (
-                        queuedMessages.map((msg, index) => {
-                          const isMsgSelected = selectedQueueMessageIds.includes(msg.id);
-                          return (
-                            <div
-                              key={msg.id}
-                              onMouseDown={(e) => handleQueueMessageMouseDown(msg.id, e)}
-                              onClick={() => toggleSelectQueueMessage(msg.id)}
-                              className={`w-72 min-w-[288px] p-3 rounded-xl border flex flex-col justify-between transition-all shrink-0 text-xs cursor-grab active:cursor-grabbing select-none ${isMsgSelected
-                                ? 'bg-teal-50/90 border-teal-600 ring-2 ring-teal-500/40 shadow-md'
-                                : 'border-teal-200 bg-white hover:border-teal-400 shadow-2xs hover:shadow-xs'
-                                }`}
-                            >
-                              <div>
-                                {/* Header: Submitter info and FIFO Rank */}
-                                <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1.5">
-                                  <span className="font-extrabold text-teal-900 bg-teal-50 border border-teal-200 px-1.5 py-0.2 rounded">
-                                    #{index + 1} in Admin Queue
-                                  </span>
-                                  <span className="flex items-center gap-1 font-semibold text-slate-500">
-                                    <Clock className="w-3 h-3 text-slate-400" />
-                                    {msg.arrivalTime}
-                                  </span>
-                                </div>
-
-                                <div className="flex items-center gap-2 mb-1">
-                                  <div className="w-6 h-6 rounded-full bg-teal-600 text-white font-black text-[10px] flex items-center justify-center shrink-0">
-                                    {msg.submitterName.split(' ').map(n => n[0]).join('')}
-                                  </div>
-                                  <div className="truncate">
-                                    <h4 className="font-bold text-slate-900 text-xs truncate">
-                                      {msg.submitterName}
-                                    </h4>
-                                    <span className="text-[9.5px] text-slate-400 truncate block">
-                                      {msg.submitterLocation}
-                                    </span>
-                                  </div>
-                                </div>
-
-                                {/* Subject & Snippet */}
-                                <h5 className="font-bold text-slate-800 text-[11px] mt-1 line-clamp-1">
-                                  {msg.subject}
-                                </h5>
-                                <p className="text-[10.5px] text-slate-600 line-clamp-2 mt-0.5 leading-snug">
-                                  {msg.messageText}
-                                </p>
-
-                                {msg.ideaCode && (
-                                  <span className="inline-block mt-1 font-mono-code text-[9.5px] font-bold text-sky-800 bg-sky-50 border border-sky-200 px-1.5 py-0.2 rounded">
-                                    Ref: {msg.ideaCode}
-                                  </span>
-                                )}
-                              </div>
-
-                              {/* Footer: Quick Assign to Available Agents (or Drag to Agent Station) */}
-                              <div className="pt-2 border-t border-slate-100 mt-2 flex items-center justify-between text-[10px]">
-                                <span className={`font-extrabold px-1.5 py-0.2 rounded border ${msg.priority === 'Urgent' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-slate-100 text-slate-600 border-slate-200'
-                                  }`}>
-                                  {msg.priority}
-                                </span>
-
-                                <div className="flex items-center gap-1">
-                                  {availableAgents.length === 0 ? (
-                                    <span className="text-[9.5px] text-amber-700 font-bold">No Agents Free</span>
-                                  ) : (
-                                    availableAgents.slice(0, 2).map((agent) => (
-                                      <button
-                                        key={agent.id}
-                                        onClick={(e) => {
-                                          e.preventDefault();
-                                          e.stopPropagation();
-                                          onAssignMessageToAgent?.(msg.id, agent.id);
-                                        }}
-                                        title={`Assign enquiry to ${agent.name}`}
-                                        className="px-2 py-0.5 bg-teal-50 hover:bg-teal-600 text-teal-800 hover:text-white rounded font-bold text-[10px] border border-teal-200 transition-colors shadow-2xs cursor-pointer"
-                                      >
-                                        → {agent.name.split(' ')[0]}
-                                      </button>
-                                    ))
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                          );
-                        })
-                      )
-                    )}
-
-                    {/* Track 3: ADJUDICATION QUEUE (Accessible to Admin & Evaluators) */}
-                    {queueTab === 'adjudication' && (
-                      adjudicationIdeas.length === 0 ? (
-                        <div className="w-full py-6 text-center text-slate-400">
-                          <Award className="w-6 h-6 mx-auto mb-1 text-purple-400" />
-                          <p className="text-xs font-bold text-slate-700">Adjudication Queue is clear</p>
-                          <p className="text-[10.5px] text-slate-400 mt-0.5">
-                            Proposals approved through technical evaluation will stream here for board review.
-                          </p>
-                        </div>
-                      ) : (
-                        adjudicationIdeas.map((idea) => (
-                          <div
-                            key={`adj-card-${idea.id}`}
-                            className="w-72 min-w-[288px] p-3 rounded-xl border border-purple-200 bg-purple-50/40 flex flex-col justify-between shrink-0 shadow-2xs hover:shadow-xs text-xs"
-                          >
-                            <div>
-                              <div className="flex items-center justify-between text-[10px] mb-1">
-                                <span className="font-mono-code font-bold text-purple-900 bg-purple-100 px-1.5 py-0.2 rounded border border-purple-200">
-                                  {idea.code || idea.id}
-                                </span>
-                                <span className="text-purple-700 font-extrabold bg-purple-100/90 border border-purple-200 px-2 py-0.5 rounded-full flex items-center gap-1 text-[9.5px]">
-                                  <CheckCircle2 className="w-3 h-3 text-purple-600" />
-                                  Ready for Board
-                                </span>
-                              </div>
-                              <h4 className="font-bold text-slate-900 leading-snug line-clamp-2 mt-1">
-                                {idea.title}
-                              </h4>
-                              <p className="text-[11px] text-slate-500 mt-0.5 truncate">
-                                {idea.enterpriseName || idea.submitterName || 'Promoter Profile'}
-                              </p>
-                            </div>
-                            <div className="pt-2 border-t border-purple-100 mt-2 flex items-center justify-between text-[10.5px]">
-                              <div>
-                                <span className="text-slate-400 text-[9.5px] block">Capital Demand</span>
-                                <span className="font-mono-code font-bold text-slate-800">
-                                  {new Intl.NumberFormat('en-BW', { style: 'currency', currency: 'BWP', maximumFractionDigits: 0 }).format(idea.capitalAsk || 0)}
-                                </span>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  e.stopPropagation();
-                                  onOpenDossier?.(idea.id);
-                                }}
-                                className="px-2.5 py-1 bg-purple-600 hover:bg-purple-700 text-white rounded-md font-bold text-[10px] transition-colors shadow-2xs cursor-pointer flex items-center gap-1"
-                              >
-                                <FileText className="w-3 h-3" />
-                                <span>Board Review</span>
-                              </button>
-                            </div>
-                          </div>
-                        ))
-                      )
-                    )}
-                  </div>
+                            );
+                          })
+                        )
+                      )}
+                    </div>
                   )}
 
                   {/* Horizontal Queue Resizing Handles */}
@@ -2776,10 +2824,10 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
             })()}
 
             {/* ============================================================== */}
-            {/* EVALUATOR TECHNICAL DILIGENCE WIREFRAME WORKSPACE              */}
-            {/* 1. Idea Intake Header -> 4 Columns of Evaluation Workflow      */}
+            {/* EVALUATOR / ADJUDICATOR DILIGENCE WIREFRAME WORKSPACE          */}
+            {/* 1. Idea Intake Header -> 4 Columns of Evaluation / Board Flow  */}
             {/* ============================================================== */}
-            {isEvaluator && (
+            {isReviewerWorkspace && (
               evaluatorCanvasIdeas.length === 0 ? (
                 /* Empty Droppable Target on Canvas */
                 <div
@@ -2789,9 +2837,11 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                   <div className="w-12 h-12 mx-auto mb-3 bg-amber-100 rounded-2xl flex items-center justify-center text-amber-800 shadow-2xs">
                     <Sparkles className="w-6 h-6 text-amber-600" />
                   </div>
-                  <h3 className="text-sm font-bold text-slate-800">Your Technical Diligence Canvas is Ready</h3>
+                  <h3 className="text-sm font-bold text-slate-800">
+                    {isAdjudicator ? 'Your Board Adjudication Canvas is Ready' : 'Your Technical Diligence Canvas is Ready'}
+                  </h3>
                   <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto leading-relaxed">
-                    Drag any proposal from the <strong>Assigned Evaluations</strong> sidebar on the left or the <strong>Ideas Queue</strong> above and drop it here onto the canvas.
+                    Drag any proposal from the <strong>{isAdjudicator ? 'Assigned Adjudications' : 'Assigned Evaluations'}</strong> sidebar on the left or the <strong>Ideas Queue</strong> above and drop it here onto the canvas.
                   </p>
                   <div className="mt-5 inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-white border border-amber-200 text-amber-900 font-bold text-[11px] shadow-2xs">
                     <span>● 1. Idea Intake</span>
@@ -2800,7 +2850,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                     <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
                     <span>Approval Gate</span>
                     <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
-                    <span>Adjudication Queue</span>
+                    <span>{isAdjudicator ? 'Pilot Phase' : 'Adjudication Queue'}</span>
                   </div>
                 </div>
               ) : (
@@ -2845,7 +2895,9 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                     const step2Size = getCardSize(`${idea.id}__step2`, 300, 320);
 
                     const comments = ideaCommentsMap[idea.id] || [];
-                    const isApproved = idea.status === 'completed' || adjudicationIdeas.some((i) => i.id === idea.id);
+                    const isApproved = isAdjudicator
+                      ? ((idea.status as string) === 'adjudicated' || (idea as any).stageId === 'pilot_phase')
+                      : (idea.status === 'completed' || adjudicationIdeas.some((i) => i.id === idea.id));
                     const currentComment = inlineCommentInput[idea.id] || '';
                     const hasDetachedSubCards = Boolean(
                       ideaCustomPositions[`eval__${idea.id}`] ||
@@ -3080,11 +3132,10 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                                   return (
                                     <div
                                       key={c.id || `c-${cIdx}`}
-                                      className={`p-2 rounded-xl text-[11px] leading-snug border ${
-                                        isOfficial
-                                          ? 'bg-amber-50/70 border-amber-200 text-amber-950 ml-2'
-                                          : 'bg-teal-50/70 border-teal-200 text-teal-950 mr-2'
-                                      }`}
+                                      className={`p-2 rounded-xl text-[11px] leading-snug border ${isOfficial
+                                        ? 'bg-amber-50/70 border-amber-200 text-amber-950 ml-2'
+                                        : 'bg-teal-50/70 border-teal-200 text-teal-950 mr-2'
+                                        }`}
                                     >
                                       <div className="flex items-center justify-between text-[9px] mb-0.5">
                                         <span className={`font-bold uppercase ${isOfficial ? 'text-amber-800' : 'text-teal-800'}`}>
@@ -3170,11 +3221,10 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                         <div
                           style={{ left: gatePos.x, top: gatePos.y, width: gateSize.width, height: gateSize.height }}
                           onMouseDown={(e) => startDragCard('idea', `eval__${idea.id}__gate`, gatePos.x, gatePos.y, e)}
-                          className={`absolute rounded-2xl shadow-md p-4 z-20 text-xs select-none border-2 flex flex-col justify-between transition-shadow cursor-move group ${
-                            isApproved
-                              ? 'bg-emerald-50/50 border-emerald-400 hover:border-emerald-500'
-                              : 'bg-white border-emerald-300 hover:border-emerald-500'
-                          }`}
+                          className={`absolute rounded-2xl shadow-md p-4 z-20 text-xs select-none border-2 flex flex-col justify-between transition-shadow cursor-move group ${isApproved
+                            ? 'bg-emerald-50/50 border-emerald-400 hover:border-emerald-500'
+                            : 'bg-white border-emerald-300 hover:border-emerald-500'
+                            }`}
                         >
                           <div>
                             {/* Header */}
@@ -3185,11 +3235,10 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                                 <span>Approval Gate</span>
                               </span>
                               <span
-                                className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${
-                                  isApproved
-                                    ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
-                                    : 'bg-amber-50 text-amber-800 border-amber-200'
-                                }`}
+                                className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${isApproved
+                                  ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                                  : 'bg-amber-50 text-amber-800 border-amber-200'
+                                  }`}
                               >
                                 {isApproved ? 'Approved for Next Stage' : 'Pending Required Items'}
                               </span>
@@ -3204,11 +3253,10 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                                 <span className="font-semibold">1. Read through submitted idea</span>
                               </div>
-                              <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${
-                                comments.length > 0
-                                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
-                                  : 'bg-slate-50 border-slate-200 text-slate-600'
-                              }`}>
+                              <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${comments.length > 0
+                                ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                                : 'bg-slate-50 border-slate-200 text-slate-600'
+                                }`}>
                                 <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${comments.length > 0 ? 'text-emerald-600' : 'text-slate-300'}`} />
                                 <span className="font-semibold">2. Seek clarity via comment chats ({comments.length})</span>
                               </div>
@@ -3216,11 +3264,10 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                                 <span className="font-semibold">3. Request supporting documentation</span>
                               </div>
-                              <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${
-                                isApproved
-                                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
-                                  : 'bg-slate-50 border-slate-200 text-slate-600'
-                              }`}>
+                              <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${isApproved
+                                ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                                : 'bg-slate-50 border-slate-200 text-slate-600'
+                                }`}>
                                 <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${isApproved ? 'text-emerald-600' : 'text-slate-300'}`} />
                                 <span className="font-semibold">4. Approve for next step</span>
                               </div>
@@ -3232,7 +3279,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                             {isApproved ? (
                               <div className="w-full py-2 px-3 bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-xl font-extrabold text-xs text-center flex items-center justify-center gap-1.5 shadow-2xs">
                                 <CheckCircle2 className="w-4 h-4 text-emerald-700" />
-                                <span>Approved for Adjudication</span>
+                                <span>{isAdjudicator ? 'Sanctioned for Pilot Phase' : 'Approved for Adjudication'}</span>
                               </div>
                             ) : (
                               <button
@@ -3241,7 +3288,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                                 className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold text-xs transition-colors flex items-center justify-center gap-2 shadow-xs cursor-pointer active:scale-98"
                               >
                                 <Rocket className="w-4 h-4" />
-                                <span>Approve for Next Step →</span>
+                                <span>{isAdjudicator ? 'Approve Board Decision →' : 'Approve for Next Step →'}</span>
                               </button>
                             )}
                           </div>
@@ -3269,16 +3316,15 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                         </div>
 
                         {/* ---------------------------------------------------- */}
-                        {/* COLUMN 4: STEP 2 MOVED TO ADJUDICATION               */}
+                        {/* COLUMN 4: STEP 2 NEXT STAGE                          */}
                         {/* ---------------------------------------------------- */}
                         <div
                           style={{ left: step2Pos.x, top: step2Pos.y, width: step2Size.width, height: step2Size.height }}
                           onMouseDown={(e) => startDragCard('idea', `eval__${idea.id}__step2`, step2Pos.x, step2Pos.y, e)}
-                          className={`absolute rounded-2xl shadow-md p-4 z-20 text-xs select-none border-2 flex flex-col justify-between transition-shadow cursor-move group ${
-                            isApproved
-                              ? 'bg-purple-50/50 border-purple-400 hover:border-purple-500'
-                              : 'bg-slate-50/50 border-slate-300 hover:border-slate-400 opacity-80'
-                          }`}
+                          className={`absolute rounded-2xl shadow-md p-4 z-20 text-xs select-none border-2 flex flex-col justify-between transition-shadow cursor-move group ${isApproved
+                            ? 'bg-purple-50/50 border-purple-400 hover:border-purple-500'
+                            : 'bg-slate-50/50 border-slate-300 hover:border-slate-400 opacity-80'
+                            }`}
                         >
                           <div>
                             {/* Header */}
@@ -3286,16 +3332,15 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                               <span className="font-extrabold text-slate-900 text-xs flex items-center gap-1.5">
                                 <GripVertical className="w-3.5 h-3.5 text-slate-300 group-hover:text-purple-600 transition-colors" />
                                 <Award className="w-4 h-4 text-purple-600" />
-                                <span>Step 2: Adjudication Board</span>
+                                <span>{isAdjudicator ? 'Step 2: Pilot Phase Gate' : 'Step 2: Adjudication Board'}</span>
                               </span>
                               <span
-                                className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${
-                                  isApproved
-                                    ? 'bg-purple-100 text-purple-900 border-purple-300'
-                                    : 'bg-slate-100 text-slate-600 border-slate-200'
-                                }`}
+                                className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${isApproved
+                                  ? 'bg-purple-100 text-purple-900 border-purple-300'
+                                  : 'bg-slate-100 text-slate-600 border-slate-200'
+                                  }`}
                               >
-                                {isApproved ? 'In Adjudication Queue' : 'Locked'}
+                                {isApproved ? (isAdjudicator ? 'In Pilot Phase' : 'In Adjudication Queue') : 'Locked'}
                               </span>
                             </div>
 
@@ -3303,7 +3348,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                             {isApproved ? (
                               <div className="space-y-3">
                                 <div className="p-2.5 rounded-xl bg-purple-100/70 border border-purple-200 text-purple-950 text-[11px] leading-relaxed">
-                                  <strong>🎉 Successfully Promoted!</strong> This proposal is officially in the <strong>Adjudication Queue</strong> ready for National Board statutory quorum voting and capital sanctioning.
+                                  <strong>🎉 {isAdjudicator ? 'Board Approved!' : 'Successfully Promoted!'}</strong> This proposal has cleared {isAdjudicator ? 'Stage 5 Board Adjudication and entered Stage 6 Pilot Phase.' : <>and is officially in the <strong>Adjudication Queue</strong> ready for National Board statutory quorum voting and capital sanctioning.</>}
                                 </div>
                                 <div className="text-[11px] text-slate-600 space-y-1">
                                   <div className="flex justify-between">
@@ -3321,7 +3366,9 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                                 <Award className="w-8 h-8 mx-auto mb-2 opacity-30 text-slate-400" />
                                 <p className="text-xs font-semibold text-slate-600">Awaiting Approval Gate</p>
                                 <p className="text-[10.5px] text-slate-400 mt-1 leading-snug">
-                                  Complete Step 1 evaluation and approve the proposal at the Approval Gate to stream into the Adjudication Queue.
+                                  {isAdjudicator
+                                    ? 'Complete board adjudication review and approve at the gate to advance into Stage 6 Pilot Phase.'
+                                    : 'Complete Step 1 evaluation and approve the proposal at the Approval Gate to stream into the Adjudication Queue.'}
                                 </p>
                               </div>
                             )}
@@ -3335,7 +3382,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                                 onClick={() => setQueueTab('adjudication')}
                                 className="w-full py-2 px-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
                               >
-                                <span>View in Adjudication Queue →</span>
+                                <span>{isAdjudicator ? 'Pilot Phase Sanctioned ✓' : 'View in Adjudication Queue →'}</span>
                               </button>
                             ) : (
                               <div className="w-full py-2 px-3 bg-slate-100 text-slate-400 rounded-xl font-medium text-xs text-center border border-slate-200">
@@ -3377,7 +3424,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
             {/* Group Selection Supported: Drag any item to move group together */}
             {/* Automatic SLA Health Color Coding: Clean / Orange / Red         */}
             {/* ============================================================== */}
-            {!isEvaluator && canvasStations.map((station) => {
+            {!isReviewerWorkspace && canvasStations.map((station) => {
               const isAgentStation = station.user.role === 'Agent' || station.stationType === 'agent';
               const assignedIdeas = station.assignedIdeaIds
                 .map((id) => assignedIdeasMap[id])
@@ -3604,7 +3651,11 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                     {/* Count Badge */}
                     <div className="p-2 bg-slate-50 rounded-xl border border-slate-200 mb-2.5 flex items-center justify-between">
                       <span className="text-[10.5px] font-semibold text-slate-600">
-                        {isAgentStation ? 'Active Enquiries:' : 'Currently Evaluating:'}
+                        {isAgentStation
+                          ? 'Active Enquiries:'
+                          : station.user.role === 'Adjudicator'
+                            ? 'Currently Adjudicating:'
+                            : 'Currently Evaluating:'}
                       </span>
                       <span className={`text-sm font-black ${isAgentStation ? 'text-teal-700' : 'text-[#006194]'}`}>
                         {isAgentStation
@@ -3683,8 +3734,8 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                       >
                         {selectedQueueIdeaIds.length > 0
                           ? (isAdmin
-                              ? `📥 Click to Assign ${selectedQueueIdeaIds.length} Selected Idea${selectedQueueIdeaIds.length > 1 ? 's' : ''}`
-                              : `📥 Place ${selectedQueueIdeaIds.length} Selected Idea${selectedQueueIdeaIds.length > 1 ? 's' : ''} on Canvas`)
+                            ? `📥 Click to Assign ${selectedQueueIdeaIds.length} Selected Idea${selectedQueueIdeaIds.length > 1 ? 's' : ''}`
+                            : `📥 Place ${selectedQueueIdeaIds.length} Selected Idea${selectedQueueIdeaIds.length > 1 ? 's' : ''} on Canvas`)
                           : (isAdmin ? 'Drop queue ideas here to assign' : 'Drop ideas here or onto canvas')}
                       </button>
                     )}
@@ -3822,9 +3873,9 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                           </div>
                         </div>
 
-                        {/* Card Actions: Tailored for Evaluator vs Administrator */}
+                        {/* Card Actions: Tailored for Evaluator / Adjudicator vs Administrator */}
                         <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-1 flex-wrap">
-                          {isEvaluator || !isAdmin ? (
+                          {isReviewerWorkspace || !isAdmin ? (
                             <>
                               {/* 1. Read Details / Dossier */}
                               <button
@@ -4215,6 +4266,18 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                         type="text"
                         value={editingAnnotationText}
                         onChange={(e) => setEditingAnnotationText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            onUpdateAnnotation?.(ann.id, {
+                              text: editingAnnotationText.trim() || ann.text,
+                              subtext: editingAnnotationSubtext.trim() || undefined,
+                            });
+                            setEditingAnnotationId(null);
+                          } else if (e.key === 'Escape') {
+                            setEditingAnnotationId(null);
+                          }
+                        }}
                         className="w-full px-2 py-1 text-xs font-bold bg-white/90 border border-slate-300 rounded focus:outline-hidden"
                         placeholder="Label or note title..."
                         autoFocus
@@ -4224,6 +4287,18 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                           type="text"
                           value={editingAnnotationSubtext}
                           onChange={(e) => setEditingAnnotationSubtext(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              onUpdateAnnotation?.(ann.id, {
+                                text: editingAnnotationText.trim() || ann.text,
+                                subtext: editingAnnotationSubtext.trim() || undefined,
+                              });
+                              setEditingAnnotationId(null);
+                            } else if (e.key === 'Escape') {
+                              setEditingAnnotationId(null);
+                            }
+                          }}
                           className="w-full px-2 py-1 text-[10.5px] bg-white/80 border border-slate-300 rounded focus:outline-hidden"
                           placeholder="Optional subtitle..."
                         />
@@ -4377,10 +4452,12 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                   Assigning {queuePointerDrag.ideaIds.length} Idea{queuePointerDrag.ideaIds.length > 1 ? 's' : ''}
                 </span>
                 <span className="block text-[11px] text-white/95 max-w-[220px] truncate font-medium">
-                  {queueIdeas.find((i) => i.id === queuePointerDrag.ideaIds[0])?.title || 'Selected idea'}
+                  {queueIdeas.find((i) => i.id === queuePointerDrag.ideaIds[0])?.title ||
+                    adjudicationIdeas.find((i) => i.id === queuePointerDrag.ideaIds[0])?.title ||
+                    'Selected idea'}
                 </span>
                 <span className="block text-[9.5px] text-sky-200 font-semibold mt-0.5">
-                  {hoveredStationId ? '🎯 Over Evaluator! Release mouse to assign' : 'Hover over Evaluator station'}
+                  {hoveredStationId ? '🎯 Over Official Station! Release mouse to assign' : 'Hover over Evaluator or Adjudicator station'}
                 </span>
               </div>
             </div>
