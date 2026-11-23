@@ -35,6 +35,7 @@ import {
 import { getDatabase, ref as rtdbRef, remove } from 'firebase/database';
 import { getStorage, ref as storageRef, uploadBytes, getDownloadURL } from 'firebase/storage';
 import firebaseConfig from '../../firebase-applet-config.json';
+import type { FaqItem, SystemFeedbackItem, AdjudicatorCollaborativeScore } from '../types/ceda.ts';
 
 const isFirebaseConfigured = Boolean(firebaseConfig?.apiKey && firebaseConfig?.projectId);
 
@@ -235,7 +236,8 @@ export interface RealtimeNotificationItem {
     | 'Screening update'
     | 'Clarification message'
     | 'Workspace invite'
-    | 'Citizen enquiry';
+    | 'Citizen enquiry'
+    | 'SLA Violation';
   message: string;
   user: string;
   targetRole?: string;
@@ -867,21 +869,40 @@ export const subscribeToGlobalLogout = (
   }
 };
 
+const ADMIN_ALERTS_BC = 'ceda_admin_alerts_v1';
+
 export const publishAdminAlert = async (alert: {
   id: string;
   targetUserId: number;
   targetUserName: string;
+  targetUserEmail?: string;
   targetUserRole: string;
   type: string;
   title: string;
   message: string;
   relatedIdeaCode?: string;
 }) => {
+  const payload = {
+    ...alert,
+    targetUserEmail: alert.targetUserEmail ? alert.targetUserEmail.trim().toLowerCase() : undefined,
+    timestamp: new Date().toISOString(),
+    createdAtMs: Date.now(),
+  };
+
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const bc = new BroadcastChannel(ADMIN_ALERTS_BC);
+      bc.postMessage(payload);
+      bc.close();
+    }
+  } catch {
+    // ignore
+  }
+
   if (!firestore) return;
   try {
     await addDoc(collection(firestore, 'admin_alerts'), {
-      ...alert,
-      timestamp: new Date().toISOString(),
+      ...stripUndefinedDeep(payload),
       createdAt: serverTimestamp(),
     });
   } catch (err) {
@@ -892,30 +913,77 @@ export const publishAdminAlert = async (alert: {
 export const subscribeToAdminAlerts = (
   onAlerts: (alerts: any[]) => void
 ) => {
-  if (!firestore) return () => {};
+  const firestoreAlerts: any[] = [];
+  const bcAlerts: any[] = [];
+
+  const emitMerged = () => {
+    const map = new Map<string, any>();
+    for (const a of [...firestoreAlerts, ...bcAlerts]) {
+      const k = String(a.id || a.firestoreId || `${a.title}_${a.targetUserId}`);
+      map.set(k, a);
+    }
+    const merged = Array.from(map.values()).sort(
+      (a, b) => Number(b.createdAtMs || 0) - Number(a.createdAtMs || 0)
+    );
+    onAlerts(merged);
+  };
+
+  let bc: BroadcastChannel | null = null;
   try {
-    const q = query(
-      collection(firestore, 'admin_alerts'),
-      orderBy('createdAt', 'desc'),
-      limit(30)
-    );
-    return onSnapshot(
-      q,
-      (snapshot) => {
-        const items = snapshot.docs.map((d) => ({
-          ...(d.data() as any),
-          firestoreId: d.id,
-          timestamp: formatTimestamp(d.data().createdAt || d.data().timestamp),
-        }));
-        onAlerts(items);
-      },
-      (err) => {
-        console.warn('Firestore admin alerts subscription notice:', err);
-      }
-    );
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      bc = new BroadcastChannel(ADMIN_ALERTS_BC);
+      bc.onmessage = (ev) => {
+        if (ev?.data && ev.data.title) {
+          bcAlerts.unshift({
+            ...ev.data,
+            timestamp: 'Just now',
+          });
+          emitMerged();
+        }
+      };
+    }
   } catch {
-    return () => {};
+    bc = null;
   }
+
+  let unsubFirestore = () => {};
+  if (firestore) {
+    try {
+      const q = query(
+        collection(firestore, 'admin_alerts'),
+        orderBy('createdAt', 'desc'),
+        limit(30)
+      );
+      unsubFirestore = onSnapshot(
+        q,
+        (snapshot) => {
+          firestoreAlerts.length = 0;
+          snapshot.docs.forEach((d) => {
+            firestoreAlerts.push({
+              ...(d.data() as any),
+              firestoreId: d.id,
+              timestamp: formatTimestamp(d.data().createdAt || d.data().timestamp),
+            });
+          });
+          emitMerged();
+        },
+        (err) => {
+          console.warn('Firestore admin alerts subscription notice:', err);
+        }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  return () => {
+    unsubFirestore();
+    try {
+      bc?.close();
+    } catch {
+      // ignore
+    }
+  };
 };
 
 // ============================================================================
@@ -1336,6 +1404,35 @@ export const subscribeToClarificationChat = (
   };
 };
 
+const ASSIGNED_IDEAS_STORAGE_KEY = 'ceda_global_assigned_ideas_v1';
+const ASSIGNED_IDEAS_BC = 'ceda_assigned_ideas_v1';
+
+const readLocalAssignedIdeasMap = (): Record<string, any> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(ASSIGNED_IDEAS_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const writeLocalAssignedIdeasMap = (map: Record<string, any>) => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(ASSIGNED_IDEAS_STORAGE_KEY, JSON.stringify(map));
+    if ('BroadcastChannel' in window) {
+      const bc = new BroadcastChannel(ASSIGNED_IDEAS_BC);
+      bc.postMessage({ type: 'ASSIGNED_IDEAS_SYNC', updatedAtMs: Date.now() });
+      bc.close();
+    }
+  } catch {
+    // ignore storage/broadcast errors
+  }
+};
+
 export const saveIdeaAssignment = async (assignment: {
   innovationId: string;
   ideaTitle: string;
@@ -1346,13 +1443,22 @@ export const saveIdeaAssignment = async (assignment: {
   status: string;
   idea: any;
 }) => {
+  const key = `${assignment.evaluatorId}_${assignment.innovationId}`;
+  const cleanAssignment = stripUndefinedDeep({
+    ...assignment,
+    updatedAtMs: Date.now(),
+  });
+
+  const localMap = readLocalAssignedIdeasMap();
+  localMap[key] = cleanAssignment;
+  writeLocalAssignedIdeasMap(localMap);
+
   if (!firestore) return;
   try {
-    const key = `${assignment.evaluatorId}_${assignment.innovationId}`;
     await setDoc(
       doc(firestore, 'assigned_ideas', key),
       {
-        ...assignment,
+        ...cleanAssignment,
         updatedAt: serverTimestamp(),
       },
       { merge: true }
@@ -1367,44 +1473,141 @@ export const subscribeToAssignedIdeas = (
   evaluatorEmailOrCallback: string | ((assignments: any[]) => void),
   optionalCallback?: (assignments: any[]) => void
 ) => {
-  if (!firestore || !evaluatorId) return () => {};
+  if (!evaluatorId) return () => {};
   const evaluatorEmail = typeof evaluatorEmailOrCallback === 'string' ? evaluatorEmailOrCallback : undefined;
   const callback = typeof evaluatorEmailOrCallback === 'function' ? evaluatorEmailOrCallback : optionalCallback;
   if (!callback) return () => {};
 
+  const idStr = String(evaluatorId);
+  const emailLower = evaluatorEmail ? evaluatorEmail.trim().toLowerCase() : '';
+  const matchesAssignee = (a: any) => {
+    if (!a) return false;
+    const matchesId = a.evaluatorId !== undefined && a.evaluatorId !== null && String(a.evaluatorId) === idStr;
+    const matchesEmail = Boolean(emailLower && a.evaluatorEmail && a.evaluatorEmail.trim().toLowerCase() === emailLower);
+    return matchesId || matchesEmail;
+  };
+
+  const emitFromLocal = () => {
+    const map = readLocalAssignedIdeasMap();
+    const list = Object.values(map).filter(matchesAssignee);
+    callback(list);
+  };
+
+  emitFromLocal();
+
+  let bc: BroadcastChannel | null = null;
   try {
-    const qAll = collection(firestore, 'assigned_ideas');
-    return onSnapshot(
-      qAll,
-      (snapshot) => {
-        const idStr = String(evaluatorId);
-        const emailLower = evaluatorEmail ? evaluatorEmail.trim().toLowerCase() : '';
-        const list = snapshot.docs
-          .map((d) => d.data())
-          .filter((a: any) => {
-            const matchesId = a.evaluatorId && String(a.evaluatorId) === idStr;
-            const matchesEmail = emailLower && a.evaluatorEmail && a.evaluatorEmail.trim().toLowerCase() === emailLower;
-            return matchesId || matchesEmail;
-          });
-        callback(list);
-      },
-      (err) => {
-        console.warn('subscribeToAssignedIdeas snapshot error:', err);
-      }
-    );
-  } catch (err) {
-    console.warn('subscribeToAssignedIdeas error:', err);
-    return () => {};
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      bc = new BroadcastChannel(ASSIGNED_IDEAS_BC);
+      bc.onmessage = () => emitFromLocal();
+    }
+  } catch {
+    bc = null;
   }
+
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === ASSIGNED_IDEAS_STORAGE_KEY) {
+      emitFromLocal();
+    }
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', handleStorage);
+  }
+
+  let unsubFirestore = () => {};
+  if (firestore) {
+    try {
+      const qAll = collection(firestore, 'assigned_ideas');
+      unsubFirestore = onSnapshot(
+        qAll,
+        (snapshot) => {
+          const map = readLocalAssignedIdeasMap();
+          const activeRemoteKeys = new Set<string>();
+          snapshot.docs.forEach((d) => {
+            const data = d.data();
+            if (!data) return;
+            const k = d.id || `${data.evaluatorId}_${data.innovationId}`;
+            activeRemoteKeys.add(k);
+            if (matchesAssignee(data)) {
+              const existing = map[k];
+              const incomingMs = Number(data.updatedAtMs || 0);
+              const existingMs = Number(existing?.updatedAtMs || 0);
+              if (!existing || incomingMs >= existingMs) {
+                map[k] = data;
+              }
+            }
+          });
+          snapshot.docChanges().forEach((change) => {
+            if (change.type === 'removed') {
+              delete map[change.doc.id];
+            }
+          });
+          if (!snapshot.metadata.fromCache) {
+            const now = Date.now();
+            for (const [k, v] of Object.entries(map)) {
+              if (matchesAssignee(v) && !activeRemoteKeys.has(k)) {
+                const ageMs = now - Number((v as any)?.updatedAtMs || 0);
+                if (ageMs > 5000) {
+                  delete map[k];
+                }
+              }
+            }
+          }
+          try {
+            localStorage.setItem(ASSIGNED_IDEAS_STORAGE_KEY, JSON.stringify(map));
+          } catch {
+            // ignore quota errors
+          }
+          const list = Object.values(map).filter(matchesAssignee);
+          callback(list);
+        },
+        (err) => {
+          console.warn('subscribeToAssignedIdeas snapshot error:', err);
+        }
+      );
+    } catch (err) {
+      console.warn('subscribeToAssignedIdeas error:', err);
+    }
+  }
+
+  return () => {
+    unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('storage', handleStorage);
+    }
+    try {
+      bc?.close();
+    } catch {
+      // ignore
+    }
+  };
 };
 
 export const deleteIdeaAssignment = async (
   evaluatorId: number | string,
   innovationId: string
 ) => {
-  if (!firestore || !evaluatorId || !innovationId) return;
+  if (!evaluatorId || !innovationId) return;
+  const key = `${evaluatorId}_${innovationId}`;
+  const localMap = readLocalAssignedIdeasMap();
+  let changed = false;
+  if (localMap[key]) {
+    delete localMap[key];
+    changed = true;
+  }
+  for (const [k, v] of Object.entries(localMap)) {
+    if (
+      String((v as any)?.evaluatorId) === String(evaluatorId) &&
+      String((v as any)?.innovationId) === String(innovationId)
+    ) {
+      delete localMap[k];
+      changed = true;
+    }
+  }
+  if (changed) writeLocalAssignedIdeasMap(localMap);
+
+  if (!firestore) return;
   try {
-    const key = `${evaluatorId}_${innovationId}`;
     await deleteDoc(doc(firestore, 'assigned_ideas', key));
   } catch (err) {
     console.warn('deleteIdeaAssignment notice:', err);
@@ -1414,14 +1617,60 @@ export const deleteIdeaAssignment = async (
 export const deleteIdeaAssignmentsByInnovationId = async (
   innovationId: string
 ) => {
-  if (!firestore || !innovationId) return;
+  if (!innovationId) return;
+  const localMap = readLocalAssignedIdeasMap();
+  let changed = false;
+  for (const [k, v] of Object.entries(localMap)) {
+    if (String((v as any)?.innovationId) === String(innovationId)) {
+      delete localMap[k];
+      changed = true;
+    }
+  }
+  if (changed) writeLocalAssignedIdeasMap(localMap);
+
+  if (!firestore) return;
   try {
     const qAll = collection(firestore, 'assigned_ideas');
     const snap = await getDocs(qAll);
-    const toDelete = snap.docs.filter((d) => d.data()?.innovationId === innovationId);
+    const toDelete = snap.docs.filter((d) => String(d.data()?.innovationId) === String(innovationId));
     await Promise.all(toDelete.map((d) => deleteDoc(d.ref)));
   } catch (err) {
     console.warn('deleteIdeaAssignmentsByInnovationId notice:', err);
+  }
+};
+
+export const deleteAllAssignmentsForUser = async (
+  evaluatorId: number | string,
+  evaluatorEmail?: string
+) => {
+  if (!evaluatorId && !evaluatorEmail) return;
+  const idStr = evaluatorId !== undefined && evaluatorId !== null ? String(evaluatorId) : '';
+  const emailLower = evaluatorEmail ? evaluatorEmail.trim().toLowerCase() : '';
+  const matchesTarget = (a: any) => {
+    if (!a) return false;
+    const matchesId = Boolean(idStr && a.evaluatorId !== undefined && String(a.evaluatorId) === idStr);
+    const matchesEmail = Boolean(emailLower && a.evaluatorEmail && a.evaluatorEmail.trim().toLowerCase() === emailLower);
+    return matchesId || matchesEmail;
+  };
+
+  const localMap = readLocalAssignedIdeasMap();
+  let changed = false;
+  for (const [k, v] of Object.entries(localMap)) {
+    if (matchesTarget(v) || (idStr && k.startsWith(`${idStr}_`))) {
+      delete localMap[k];
+      changed = true;
+    }
+  }
+  if (changed) writeLocalAssignedIdeasMap(localMap);
+
+  if (!firestore) return;
+  try {
+    const qAll = collection(firestore, 'assigned_ideas');
+    const snap = await getDocs(qAll);
+    const toDelete = snap.docs.filter((d) => matchesTarget(d.data()) || (idStr && d.id.startsWith(`${idStr}_`)));
+    await Promise.all(toDelete.map((d) => deleteDoc(d.ref)));
+  } catch (err) {
+    console.warn('deleteAllAssignmentsForUser notice:', err);
   }
 };
 
@@ -1544,6 +1793,115 @@ export const subscribeToWorkspaceInvites = (
         },
         (err) => {
           console.warn('Workspace invites subscription notice:', err);
+        }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  return () => {
+    unsubFirestore();
+    try {
+      bc?.close();
+    } catch {
+      // ignore
+    }
+  };
+};
+
+export interface WorkspaceMemberRemovedEvent {
+  id?: string;
+  workspaceId: string;
+  workspaceName: string;
+  removedUserId?: string | number | null;
+  removedEmail?: string;
+  removedByName: string;
+  action: 'removed' | 'cancelled';
+  createdAtMs: number;
+}
+
+const WORKSPACE_MEMBER_REMOVED_BC = 'ceda_workspace_member_removed_v1';
+
+export const publishWorkspaceMemberRemoved = async (
+  event: Omit<WorkspaceMemberRemovedEvent, 'id' | 'createdAtMs'>
+) => {
+  const payload: WorkspaceMemberRemovedEvent = {
+    ...event,
+    id: `wrm_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    removedEmail: event.removedEmail ? event.removedEmail.trim().toLowerCase() : undefined,
+    createdAtMs: Date.now(),
+  };
+
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      const bc = new BroadcastChannel(WORKSPACE_MEMBER_REMOVED_BC);
+      bc.postMessage(payload);
+      bc.close();
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!firestore) return;
+  try {
+    await addDoc(collection(firestore, 'workspace_member_removals'), {
+      ...stripUndefinedDeep(payload),
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    console.warn('Firestore workspace removal broadcast notice:', err);
+  }
+};
+
+export const subscribeToWorkspaceMemberRemoved = (
+  callback: (event: WorkspaceMemberRemovedEvent) => void
+) => {
+  const seenIds = new Set<string>();
+  let bc: BroadcastChannel | null = null;
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      bc = new BroadcastChannel(WORKSPACE_MEMBER_REMOVED_BC);
+      bc.onmessage = (ev) => {
+        const data = ev?.data as WorkspaceMemberRemovedEvent | undefined;
+        if (!data || !data.workspaceId) return;
+        if (data.id && seenIds.has(data.id)) return;
+        if (data.id) seenIds.add(data.id);
+        callback(data);
+      };
+    }
+  } catch {
+    bc = null;
+  }
+
+  let unsubFirestore = () => {};
+  let initialSnapshot = true;
+  if (firestore) {
+    try {
+      const q = query(
+        collection(firestore, 'workspace_member_removals'),
+        orderBy('createdAtMs', 'desc'),
+        limit(20)
+      );
+      unsubFirestore = onSnapshot(
+        q,
+        (snapshot) => {
+          snapshot.docChanges().forEach((change) => {
+            if (change.type !== 'added') return;
+            const ev = { id: change.doc.id, ...(change.doc.data() as any) } as WorkspaceMemberRemovedEvent;
+            const isRecent = Date.now() - Number(ev.createdAtMs || 0) < 20_000;
+            if (initialSnapshot && !isRecent) {
+              if (ev.id) seenIds.add(ev.id);
+              return;
+            }
+            if (ev.id && seenIds.has(ev.id)) return;
+            if (ev.id) seenIds.add(ev.id);
+            callback(ev);
+          });
+          initialSnapshot = false;
+        },
+        (err) => {
+          console.warn('Workspace member removal subscription notice:', err);
         }
       );
     } catch {
@@ -1722,6 +2080,36 @@ export const subscribeToWorkspaceCursors = (
 // ============================================================================
 
 const CITIZEN_ENQUIRIES_BC = 'ceda_citizen_enquiries_v1';
+const CITIZEN_ENQUIRIES_STORAGE_KEY = 'ceda_global_citizen_enquiries_v1';
+
+const readLocalEnquiriesMap = (): Record<string, any> => {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = localStorage.getItem(CITIZEN_ENQUIRIES_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+};
+
+const writeLocalEnquiryItem = (item: any) => {
+  if (typeof window === 'undefined' || !item?.id) return;
+  try {
+    const map = readLocalEnquiriesMap();
+    const id = String(item.id);
+    const existing = map[id];
+    const incomingUpdated = Number(item.updatedAtMs || item.rawTimestamp || 0);
+    const existingUpdated = Number(existing?.updatedAtMs || existing?.rawTimestamp || 0);
+    if (!existing || incomingUpdated >= existingUpdated) {
+      map[id] = item;
+      localStorage.setItem(CITIZEN_ENQUIRIES_STORAGE_KEY, JSON.stringify(map));
+    }
+  } catch {
+    // ignore storage errors
+  }
+};
 
 export const publishCitizenEnquiry = async (enquiry: any) => {
   if (!enquiry || !enquiry.id) return;
@@ -1729,6 +2117,8 @@ export const publishCitizenEnquiry = async (enquiry: any) => {
     ...enquiry,
     updatedAtMs: Date.now(),
   });
+
+  writeLocalEnquiryItem(cleanPayload);
 
   try {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -1760,7 +2150,22 @@ export const subscribeToCitizenEnquiries = (callback: (items: any[]) => void) =>
   const firestoreMap = new Map<string, any>();
   const broadcastMap = new Map<string, any>();
 
+  const seedFromLocal = () => {
+    const localMap = readLocalEnquiriesMap();
+    for (const item of Object.values(localMap)) {
+      if (!item?.id) continue;
+      const id = String(item.id);
+      const prev = broadcastMap.get(id);
+      const itemUpdated = Number(item.updatedAtMs || item.rawTimestamp || 0);
+      const prevUpdated = Number(prev?.updatedAtMs || prev?.rawTimestamp || 0);
+      if (!prev || itemUpdated >= prevUpdated) {
+        broadcastMap.set(id, item);
+      }
+    }
+  };
+
   const emitMerged = () => {
+    seedFromLocal();
     const merged = new Map<string, any>();
     for (const item of [...firestoreMap.values(), ...broadcastMap.values()]) {
       if (!item?.id) continue;
@@ -1777,6 +2182,8 @@ export const subscribeToCitizenEnquiries = (callback: (items: any[]) => void) =>
     callback(sorted);
   };
 
+  emitMerged();
+
   let bc: BroadcastChannel | null = null;
   try {
     if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
@@ -1785,12 +2192,22 @@ export const subscribeToCitizenEnquiries = (callback: (items: any[]) => void) =>
         const data = ev?.data;
         if (data?.id) {
           broadcastMap.set(String(data.id), data);
+          writeLocalEnquiryItem(data);
           emitMerged();
         }
       };
     }
   } catch {
     bc = null;
+  }
+
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === CITIZEN_ENQUIRIES_STORAGE_KEY) {
+      emitMerged();
+    }
+  };
+  if (typeof window !== 'undefined') {
+    window.addEventListener('storage', handleStorage);
   }
 
   let unsubFirestore = () => {};
@@ -1803,7 +2220,10 @@ export const subscribeToCitizenEnquiries = (callback: (items: any[]) => void) =>
           firestoreMap.clear();
           snapshot.forEach((d) => {
             const data = d.data();
-            if (data?.id) firestoreMap.set(String(data.id), data);
+            if (data?.id) {
+              firestoreMap.set(String(data.id), data);
+              writeLocalEnquiryItem(data);
+            }
           });
           emitMerged();
         },
@@ -1818,6 +2238,9 @@ export const subscribeToCitizenEnquiries = (callback: (items: any[]) => void) =>
 
   return () => {
     unsubFirestore();
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('storage', handleStorage);
+    }
     try {
       bc?.close();
     } catch {
@@ -1961,4 +2384,662 @@ export const subscribeToAdjudicationQueue = (callback: (items: any[]) => void) =
       // ignore
     }
   };
+};
+
+// ============================================================================
+// 11. Real-Time Global Workflow Cycles Sync (Admin -> All Official Workspaces)
+// ============================================================================
+
+const WORKFLOW_CYCLES_BC = 'ceda_workflow_cycles_v1';
+const WORKFLOW_CYCLES_STORAGE_KEY = 'ceda_global_workflow_cycles_v1';
+
+export const publishWorkflowCycles = async (cycles: any[]) => {
+  if (!Array.isArray(cycles) || cycles.length === 0) return;
+  const payload = {
+    cycles,
+    updatedAtMs: Date.now(),
+  };
+
+  try {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(WORKFLOW_CYCLES_STORAGE_KEY, JSON.stringify(payload));
+      if ('BroadcastChannel' in window) {
+        const bc = new BroadcastChannel(WORKFLOW_CYCLES_BC);
+        bc.postMessage(payload);
+        bc.close();
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!firestore) return;
+  try {
+    await setDoc(
+      doc(firestore, 'system_control', 'workflow_cycles'),
+      {
+        cyclesJson: JSON.stringify(cycles),
+        updatedAtMs: payload.updatedAtMs,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('Firestore publishWorkflowCycles notice:', err);
+  }
+};
+
+export const subscribeToWorkflowCycles = (callback: (cycles: any[]) => void) => {
+  try {
+    if (typeof window !== 'undefined') {
+      const cachedRaw = localStorage.getItem(WORKFLOW_CYCLES_STORAGE_KEY);
+      if (cachedRaw) {
+        const parsed = JSON.parse(cachedRaw);
+        if (Array.isArray(parsed?.cycles) && parsed.cycles.length > 0) {
+          callback(parsed.cycles);
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      bc = new BroadcastChannel(WORKFLOW_CYCLES_BC);
+      bc.onmessage = (ev) => {
+        const data = ev?.data;
+        if (Array.isArray(data?.cycles) && data.cycles.length > 0) {
+          callback(data.cycles);
+        }
+      };
+    }
+  } catch {
+    bc = null;
+  }
+
+  let unsubFirestore = () => {};
+  if (firestore) {
+    try {
+      unsubFirestore = onSnapshot(
+        doc(firestore, 'system_control', 'workflow_cycles'),
+        (snap) => {
+          if (!snap.exists()) return;
+          const data = snap.data();
+          if (data?.cyclesJson) {
+            try {
+              const parsed = JSON.parse(data.cyclesJson);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                try {
+                  localStorage.setItem(
+                    WORKFLOW_CYCLES_STORAGE_KEY,
+                    JSON.stringify({ cycles: parsed, updatedAtMs: data.updatedAtMs || Date.now() })
+                  );
+                } catch {}
+                callback(parsed);
+              }
+            } catch {}
+          }
+        },
+        (err) => {
+          console.warn('Workflow cycles subscription notice:', err);
+        }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  return () => {
+    unsubFirestore();
+    try {
+      bc?.close();
+    } catch {
+      // ignore
+    }
+  };
+};
+
+// ============================================================================
+// 12. Real-Time Global Application Form Fields Sync (Admin -> Submitters)
+// ============================================================================
+
+const APPLICATION_FIELDS_BC = 'ceda_application_fields_v1';
+const APPLICATION_FIELDS_STORAGE_KEY = 'ceda_global_application_fields_v1';
+
+export const publishApplicationFields = async (fields: any[]) => {
+  if (!Array.isArray(fields) || fields.length === 0) return;
+  const payload = {
+    fields,
+    updatedAtMs: Date.now(),
+  };
+
+  try {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(APPLICATION_FIELDS_STORAGE_KEY, JSON.stringify(payload));
+      if ('BroadcastChannel' in window) {
+        const bc = new BroadcastChannel(APPLICATION_FIELDS_BC);
+        bc.postMessage(payload);
+        bc.close();
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!firestore) return;
+  try {
+    await setDoc(
+      doc(firestore, 'system_control', 'application_fields'),
+      {
+        fieldsJson: JSON.stringify(fields),
+        updatedAtMs: payload.updatedAtMs,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('Firestore publishApplicationFields notice:', err);
+  }
+};
+
+export const subscribeToApplicationFields = (callback: (fields: any[]) => void) => {
+  try {
+    if (typeof window !== 'undefined') {
+      const cachedRaw = localStorage.getItem(APPLICATION_FIELDS_STORAGE_KEY);
+      if (cachedRaw) {
+        const parsed = JSON.parse(cachedRaw);
+        if (Array.isArray(parsed?.fields) && parsed.fields.length > 0) {
+          callback(parsed.fields);
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      bc = new BroadcastChannel(APPLICATION_FIELDS_BC);
+      bc.onmessage = (ev) => {
+        const data = ev?.data;
+        if (Array.isArray(data?.fields) && data.fields.length > 0) {
+          callback(data.fields);
+        }
+      };
+    }
+  } catch {
+    bc = null;
+  }
+
+  let unsubFirestore = () => {};
+  if (firestore) {
+    try {
+      unsubFirestore = onSnapshot(
+        doc(firestore, 'system_control', 'application_fields'),
+        (snap) => {
+          if (!snap.exists()) return;
+          const data = snap.data();
+          if (data?.fieldsJson) {
+            try {
+              const parsed = JSON.parse(data.fieldsJson);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                try {
+                  localStorage.setItem(
+                    APPLICATION_FIELDS_STORAGE_KEY,
+                    JSON.stringify({ fields: parsed, updatedAtMs: data.updatedAtMs || Date.now() })
+                  );
+                } catch {}
+                callback(parsed);
+              }
+            } catch {}
+          }
+        },
+        (err) => {
+          console.warn('Application fields subscription notice:', err);
+        }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  return () => {
+    unsubFirestore();
+    try {
+      bc?.close();
+    } catch {
+      // ignore
+    }
+  };
+};
+
+// ============================================================================
+// 13. Real-Time FAQ Knowledge Base Sync (Admin Manage -> Submitter View)
+// ============================================================================
+
+export const DEFAULT_FAQ_ITEMS: FaqItem[] = [
+  {
+    id: 'faq-default-1',
+    category: 'Application Process',
+    question: 'What documents are required before submitting an innovation proposal?',
+    answer:
+      'Prepare your Botswana Omang National ID, registered company details (CIPA UIN and BURS TIN if registered), capital facility breakdown in BWP, projected direct employment figures, and your business plan summary.',
+    updatedAt: 'Nov 2026',
+    updatedBy: 'CEDA Administration',
+  },
+  {
+    id: 'faq-default-2',
+    category: 'Statutory Compliance',
+    question: 'How does CIPA and BURS verification work during Stage 2 Screening?',
+    answer:
+      'During Stage 2 Statutory & Tax Screening, Administrators verify your enterprise registration with CIPA and tax clearance standing with BURS. If documents need clarification, you will receive a notification in your Submissions Panel.',
+    updatedAt: 'Nov 2026',
+    updatedBy: 'CEDA Administration',
+  },
+  {
+    id: 'faq-default-3',
+    category: 'Evaluation & Adjudication',
+    question: 'When does an idea advance to the Adjudication Board (Stage 5)?',
+    answer:
+      'After passing Stage 3 Technical & Financial Evaluation and Stage 4 Expert Committee Review, qualified proposals advance to Stage 5 Adjudication Board Chamber for collaborative panel scoring and final board ratification.',
+    updatedAt: 'Nov 2026',
+    updatedBy: 'CEDA Administration',
+  },
+];
+
+const FAQ_ITEMS_BC = 'ceda_faq_items_v1';
+const FAQ_ITEMS_STORAGE_KEY = 'ceda_global_faq_items_v1';
+
+export const publishFaqItems = async (items: FaqItem[]) => {
+  const payload = {
+    items,
+    explicit: true,
+    updatedAtMs: Date.now(),
+  };
+
+  try {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(FAQ_ITEMS_STORAGE_KEY, JSON.stringify(payload));
+      if ('BroadcastChannel' in window) {
+        const bc = new BroadcastChannel(FAQ_ITEMS_BC);
+        bc.postMessage(payload);
+        bc.close();
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!firestore) return;
+  try {
+    await setDoc(
+      doc(firestore, 'system_control', 'faq_items'),
+      {
+        itemsJson: JSON.stringify(items),
+        updatedAtMs: payload.updatedAtMs,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('Firestore publishFaqItems notice:', err);
+  }
+};
+
+export const subscribeToFaqItems = (callback: (items: FaqItem[]) => void) => {
+  try {
+    if (typeof window !== 'undefined') {
+      const cachedRaw = localStorage.getItem(FAQ_ITEMS_STORAGE_KEY);
+      if (cachedRaw) {
+        const parsed = JSON.parse(cachedRaw);
+        if (Array.isArray(parsed?.items)) {
+          callback(parsed.items);
+        }
+      } else {
+        localStorage.setItem(
+          FAQ_ITEMS_STORAGE_KEY,
+          JSON.stringify({ items: DEFAULT_FAQ_ITEMS, explicit: true, updatedAtMs: Date.now() })
+        );
+        callback(DEFAULT_FAQ_ITEMS);
+      }
+    }
+  } catch {
+    callback(DEFAULT_FAQ_ITEMS);
+  }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      bc = new BroadcastChannel(FAQ_ITEMS_BC);
+      bc.onmessage = (ev) => {
+        const data = ev?.data;
+        if (Array.isArray(data?.items)) {
+          callback(data.items);
+        }
+      };
+    }
+  } catch {
+    bc = null;
+  }
+
+  let unsubFirestore = () => {};
+  if (firestore) {
+    try {
+      unsubFirestore = onSnapshot(
+        doc(firestore, 'system_control', 'faq_items'),
+        (snap) => {
+          if (!snap.exists()) return;
+          const data = snap.data();
+          if (typeof data?.itemsJson === 'string') {
+            try {
+              const parsed = JSON.parse(data.itemsJson);
+              if (Array.isArray(parsed)) {
+                try {
+                  localStorage.setItem(
+                    FAQ_ITEMS_STORAGE_KEY,
+                    JSON.stringify({ items: parsed, explicit: true, updatedAtMs: data.updatedAtMs || Date.now() })
+                  );
+                } catch {}
+                callback(parsed);
+              }
+            } catch {}
+          }
+        },
+        (err) => {
+          console.warn('FAQ items subscription notice:', err);
+        }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  return () => {
+    unsubFirestore();
+    try {
+      bc?.close();
+    } catch {
+      // ignore
+    }
+  };
+};
+
+// ============================================================================
+// 14. Submitter System & Workflow Feedback -> Admin Aggregate
+// ============================================================================
+
+const SYSTEM_FEEDBACK_BC = 'ceda_system_feedback_v1';
+const SYSTEM_FEEDBACK_STORAGE_KEY = 'ceda_global_system_feedback_v1';
+
+const mergeFeedbackLists = (lists: SystemFeedbackItem[][]): SystemFeedbackItem[] => {
+  const map = new Map<string, SystemFeedbackItem>();
+  lists.flat().forEach((item) => {
+    if (!item || !item.id) return;
+    map.set(item.id, item);
+  });
+  return Array.from(map.values()).sort((a, b) => (b.createdAtMs || 0) - (a.createdAtMs || 0));
+};
+
+export const publishSystemFeedback = async (item: SystemFeedbackItem) => {
+  try {
+    if (typeof window !== 'undefined') {
+      const raw = localStorage.getItem(SYSTEM_FEEDBACK_STORAGE_KEY);
+      const prev: SystemFeedbackItem[] = raw ? JSON.parse(raw) : [];
+      const merged = mergeFeedbackLists([[item], Array.isArray(prev) ? prev : []]);
+      localStorage.setItem(SYSTEM_FEEDBACK_STORAGE_KEY, JSON.stringify(merged));
+      if ('BroadcastChannel' in window) {
+        const bc = new BroadcastChannel(SYSTEM_FEEDBACK_BC);
+        bc.postMessage({ item, items: merged });
+        bc.close();
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!firestore) return;
+  try {
+    await setDoc(doc(firestore, 'system_feedback', item.id), {
+      ...stripUndefinedDeep(item),
+      createdAtServer: serverTimestamp(),
+    });
+  } catch (err) {
+    console.warn('Firestore publishSystemFeedback notice:', err);
+  }
+};
+
+export const subscribeToSystemFeedback = (callback: (items: SystemFeedbackItem[]) => void) => {
+  let localCache: SystemFeedbackItem[] = [];
+  let remoteCache: SystemFeedbackItem[] = [];
+
+  const emit = () => {
+    callback(mergeFeedbackLists([remoteCache, localCache]));
+  };
+
+  try {
+    if (typeof window !== 'undefined') {
+      const raw = localStorage.getItem(SYSTEM_FEEDBACK_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          localCache = parsed;
+          emit();
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      bc = new BroadcastChannel(SYSTEM_FEEDBACK_BC);
+      bc.onmessage = (ev) => {
+        const incoming: SystemFeedbackItem[] = Array.isArray(ev?.data?.items)
+          ? ev.data.items
+          : ev?.data?.item
+            ? [ev.data.item]
+            : [];
+        if (incoming.length > 0) {
+          localCache = mergeFeedbackLists([incoming, localCache]);
+          try {
+            localStorage.setItem(SYSTEM_FEEDBACK_STORAGE_KEY, JSON.stringify(localCache));
+          } catch {}
+          emit();
+        }
+      };
+    }
+  } catch {
+    bc = null;
+  }
+
+  let unsubFirestore = () => {};
+  if (firestore) {
+    try {
+      const q = query(collection(firestore, 'system_feedback'), orderBy('createdAtMs', 'desc'), limit(150));
+      unsubFirestore = onSnapshot(
+        q,
+        (snap) => {
+          remoteCache = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as SystemFeedbackItem[];
+          emit();
+        },
+        (err) => {
+          console.warn('System feedback subscription notice:', err);
+        }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  return () => {
+    unsubFirestore();
+    try {
+      bc?.close();
+    } catch {
+      // ignore
+    }
+  };
+};
+
+// ============================================================================
+// 15. Collaborative Adjudicator Panel Scoring (Real-Time Shared Scorecards)
+// ============================================================================
+
+const ADJ_SCORES_BC = 'ceda_adjudicator_scores_v1';
+const ADJ_SCORES_STORAGE_KEY = 'ceda_global_adjudicator_scores_v1';
+
+const normalizeAdjScoreDocId = (innovationId: string, adjudicatorKey: string | number) => {
+  const cleanIdea = String(innovationId).replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cleanAdj = String(adjudicatorKey).toLowerCase().replace(/[^a-zA-Z0-9_-]/g, '_');
+  return `${cleanIdea}__${cleanAdj}`;
+};
+
+const mergeAdjudicatorScores = (lists: AdjudicatorCollaborativeScore[][]): AdjudicatorCollaborativeScore[] => {
+  const map = new Map<string, AdjudicatorCollaborativeScore>();
+  lists.flat().forEach((sc) => {
+    if (!sc || !sc.innovationId) return;
+    const key = sc.id || normalizeAdjScoreDocId(sc.innovationId, sc.adjudicatorEmail || sc.adjudicatorId);
+    const prev = map.get(key);
+    if (!prev || (sc.updatedAtMs || 0) >= (prev.updatedAtMs || 0)) {
+      map.set(key, { ...sc, id: key });
+    }
+  });
+  return Array.from(map.values()).sort((a, b) => (b.updatedAtMs || 0) - (a.updatedAtMs || 0));
+};
+
+export const publishAdjudicatorScore = async (score: AdjudicatorCollaborativeScore) => {
+  const docId = score.id || normalizeAdjScoreDocId(score.innovationId, score.adjudicatorEmail || score.adjudicatorId);
+  const payload: AdjudicatorCollaborativeScore = {
+    ...score,
+    id: docId,
+    updatedAtMs: score.updatedAtMs || Date.now(),
+  };
+
+  try {
+    if (typeof window !== 'undefined') {
+      const raw = localStorage.getItem(ADJ_SCORES_STORAGE_KEY);
+      const prev: AdjudicatorCollaborativeScore[] = raw ? JSON.parse(raw) : [];
+      const merged = mergeAdjudicatorScores([[payload], Array.isArray(prev) ? prev : []]);
+      localStorage.setItem(ADJ_SCORES_STORAGE_KEY, JSON.stringify(merged));
+      if ('BroadcastChannel' in window) {
+        const bc = new BroadcastChannel(ADJ_SCORES_BC);
+        bc.postMessage({ score: payload, scores: merged });
+        bc.close();
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  if (!firestore) return;
+  try {
+    await setDoc(
+      doc(firestore, 'adjudicator_scores', docId),
+      {
+        ...stripUndefinedDeep(payload),
+        updatedAtServer: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('Firestore publishAdjudicatorScore notice:', err);
+  }
+};
+
+export const subscribeToAllAdjudicatorScores = (
+  callback: (scores: AdjudicatorCollaborativeScore[]) => void
+) => {
+  let localCache: AdjudicatorCollaborativeScore[] = [];
+  let remoteCache: AdjudicatorCollaborativeScore[] = [];
+
+  const emit = () => {
+    callback(mergeAdjudicatorScores([remoteCache, localCache]));
+  };
+
+  try {
+    if (typeof window !== 'undefined') {
+      const raw = localStorage.getItem(ADJ_SCORES_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          localCache = parsed;
+          emit();
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+
+  let bc: BroadcastChannel | null = null;
+  try {
+    if (typeof window !== 'undefined' && 'BroadcastChannel' in window) {
+      bc = new BroadcastChannel(ADJ_SCORES_BC);
+      bc.onmessage = (ev) => {
+        const incoming: AdjudicatorCollaborativeScore[] = Array.isArray(ev?.data?.scores)
+          ? ev.data.scores
+          : ev?.data?.score
+            ? [ev.data.score]
+            : [];
+        if (incoming.length > 0) {
+          localCache = mergeAdjudicatorScores([incoming, localCache]);
+          try {
+            localStorage.setItem(ADJ_SCORES_STORAGE_KEY, JSON.stringify(localCache));
+          } catch {}
+          emit();
+        }
+      };
+    }
+  } catch {
+    bc = null;
+  }
+
+  let unsubFirestore = () => {};
+  if (firestore) {
+    try {
+      const q = query(collection(firestore, 'adjudicator_scores'), orderBy('updatedAtMs', 'desc'), limit(300));
+      unsubFirestore = onSnapshot(
+        q,
+        (snap) => {
+          remoteCache = snap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as AdjudicatorCollaborativeScore[];
+          emit();
+        },
+        (err) => {
+          console.warn('Adjudicator scores subscription notice:', err);
+        }
+      );
+    } catch {
+      // ignore
+    }
+  }
+
+  return () => {
+    unsubFirestore();
+    try {
+      bc?.close();
+    } catch {
+      // ignore
+    }
+  };
+};
+
+export const subscribeToAdjudicatorScores = (
+  innovationId: string,
+  callback: (scores: AdjudicatorCollaborativeScore[]) => void
+) => {
+  const targetId = String(innovationId).trim().toLowerCase();
+  return subscribeToAllAdjudicatorScores((all) => {
+    callback(
+      all.filter(
+        (s) =>
+          String(s.innovationId).trim().toLowerCase() === targetId ||
+          (s.innovationCode && String(s.innovationCode).trim().toLowerCase() === targetId)
+      )
+    );
+  });
 };

@@ -16,7 +16,8 @@ import {
   IdeaLifecycleRecord,
 } from '../../lib/stageJourneyStore.ts';
 import { useAuth } from '../../context/AuthContext.tsx';
-import { X, Radio, Bell, Eye, CheckCheck, Users } from 'lucide-react';
+import { AdminAlertNotification } from '../../types/ceda.ts';
+import { X, Radio, Bell, Eye, CheckCheck, Users, AlertTriangle } from 'lucide-react';
 
 interface LiveActivityDrawerProps {
   isOpen: boolean;
@@ -33,6 +34,7 @@ interface LiveActivityDrawerProps {
   unreadNotificationsCount?: number;
   onMarkNotificationsRead?: () => void;
   onSwitchWorkspace?: (workspaceId: string) => void;
+  adminAlerts?: AdminAlertNotification[];
 }
 
 export const LiveActivityDrawer: React.FC<LiveActivityDrawerProps> = ({
@@ -43,6 +45,7 @@ export const LiveActivityDrawer: React.FC<LiveActivityDrawerProps> = ({
   unreadNotificationsCount = 0,
   onMarkNotificationsRead,
   onSwitchWorkspace,
+  adminAlerts = [],
 }) => {
   const { currentUser, presenceStatus } = useAuth();
   const isSubmitter = currentUser?.role === 'Submitter';
@@ -205,6 +208,23 @@ export const LiveActivityDrawer: React.FC<LiveActivityDrawerProps> = ({
     return auditEvents.filter((ev) => matchesOwnedIdea(ev.ideaId || ev.code, ev.ideaTitle));
   }, [auditEvents, isSubmitter, ownedIdSet, ownedTitleSet]);
 
+  const visibleAdminAlerts = useMemo(() => {
+    const uidLower = String(currentUser?.id ?? '').trim().toLowerCase();
+    const emailLower = (currentUser?.email || '').trim().toLowerCase();
+    const roleLower = (currentUser?.role || '').trim().toLowerCase();
+    return adminAlerts.filter((a) => {
+      if (roleLower === 'administrator') return true;
+      if (isSubmitter) return false;
+      const targetIdLower = String(a.targetUserId || '').trim().toLowerCase();
+      const targetEmailLower = String(a.targetUserEmail || '').trim().toLowerCase();
+      const targetRoleLower = String(a.targetUserRole || '').trim().toLowerCase();
+      if (targetIdLower && targetIdLower === uidLower) return true;
+      if (targetEmailLower && targetEmailLower === emailLower) return true;
+      if (!targetIdLower && !targetEmailLower && targetRoleLower && targetRoleLower === roleLower) return true;
+      return false;
+    });
+  }, [adminAlerts, currentUser?.id, currentUser?.email, currentUser?.role, isSubmitter]);
+
   if (!isOpen) return null;
 
   return (
@@ -319,6 +339,53 @@ export const LiveActivityDrawer: React.FC<LiveActivityDrawerProps> = ({
             </div>
           )}
         </div>
+
+        {/* SLA & Priority Alerts (Evaluators, Adjudicators & Admins) */}
+        {!isSubmitter && visibleAdminAlerts.length > 0 && (
+          <div>
+            <div className="text-[10px] font-mono-code uppercase font-bold text-amber-600 mb-2 flex items-center justify-between gap-2">
+              <span className="flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                <span>SLA & Priority Alerts ({visibleAdminAlerts.length})</span>
+              </span>
+            </div>
+            <div className="space-y-2">
+              {visibleAdminAlerts.slice(0, 8).map((alert) => {
+                const isSla = alert.type === 'sla_warning' || alert.title.toLowerCase().includes('critical');
+                const badgeLabel = alert.title.toLowerCase().includes('critical')
+                  ? 'critical'
+                  : alert.type === 'sla_warning'
+                    ? 'sla warning'
+                    : alert.type.replace(/_/g, ' ');
+                return (
+                  <div
+                    key={alert.id}
+                    className={`p-2.5 rounded-xl border text-xs ${isSla
+                      ? 'bg-rose-50/90 border-rose-200'
+                      : 'bg-amber-50/90 border-amber-200'
+                      }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className={`font-bold ${isSla ? 'text-rose-800' : 'text-amber-800'}`}>
+                        {alert.title}
+                      </span>
+                      <span className={`text-[9.5px] font-mono-code font-bold uppercase px-1.5 py-0.5 rounded ${isSla ? 'bg-rose-100 text-rose-700' : 'bg-amber-100 text-amber-700'}`}>
+                        {badgeLabel}
+                      </span>
+                    </div>
+                    <p className="text-slate-700 text-[11px] mt-1">{alert.message}</p>
+                    <div className="text-[10px] text-slate-500 mt-1 flex items-center justify-between">
+                      <span>Target: {alert.targetUserName}</span>
+                      {alert.relatedIdeaCode && (
+                        <span className="font-mono-code">{alert.relatedIdeaCode}</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Real-Time Notifications */}
         <div>

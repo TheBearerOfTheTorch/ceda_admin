@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { 
-  Sparkles, Plus, Slash, ChevronDown, ArrowUpRight, 
+import {
+  Sparkles, Plus, Slash, ChevronDown, ArrowUpRight,
   Send, CornerDownLeft, CheckCircle2, AlertCircle
 } from 'lucide-react';
 
@@ -140,9 +140,8 @@ export const PromptBar: React.FC<PromptBarProps> = ({
                       setMode(m);
                       setShowModeDropdown(false);
                     }}
-                    className={`w-full text-left px-3 py-1.5 hover:bg-slate-50 flex items-center justify-between ${
-                      mode === m ? 'font-bold text-[#006194] bg-sky-50/50' : 'text-slate-700'
-                    }`}
+                    className={`w-full text-left px-3 py-1.5 hover:bg-slate-50 flex items-center justify-between ${mode === m ? 'font-bold text-[#006194] bg-sky-50/50' : 'text-slate-700'
+                      }`}
                   >
                     <span>{m}</span>
                     {mode === m && <CheckCircle2 className="w-3 h-3 text-[#006194]" />}

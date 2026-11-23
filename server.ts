@@ -271,7 +271,7 @@ app.patch('/api/users/:id/role', async (req: Request, res: Response) => {
 // 3. Innovations API
 app.get('/api/innovations', async (req: Request, res: Response) => {
   try {
-    const { stage, status, categoryId, submitterId } = req.query;
+    const { submitterId, submitterEmail } = req.query;
 
     const allInnovations = await db.query.innovations.findMany({
       with: {
@@ -296,6 +296,20 @@ app.get('/api/innovations', async (req: Request, res: Response) => {
       },
       orderBy: [desc(innovations.updatedAt)],
     });
+
+    if (submitterId !== undefined || submitterEmail !== undefined) {
+      const reqId = submitterId !== undefined && submitterId !== '' ? Number(submitterId) : NaN;
+      const reqEmailLower = submitterEmail ? String(submitterEmail).trim().toLowerCase() : '';
+      const scoped = allInnovations.filter((item) => {
+        const matchesId = !Number.isNaN(reqId) && item.submitterId === reqId;
+        const matchesEmail =
+          Boolean(reqEmailLower) &&
+          Boolean(item.submitter?.email) &&
+          String(item.submitter?.email).trim().toLowerCase() === reqEmailLower;
+        return matchesId || matchesEmail;
+      });
+      return res.json(scoped);
+    }
 
     res.json(allInnovations);
   } catch (error: any) {
@@ -1505,6 +1519,60 @@ app.post('/api/workspaces/:id/invite', async (req: Request, res: Response) => {
   }
 });
 
+app.delete('/api/workspaces/:id/members', async (req: Request, res: Response) => {
+  try {
+    const source = { ...(req.query || {}), ...(req.body || {}) } as Record<string, any>;
+    const memberId = source.memberId ? Number(source.memberId) : null;
+    const targetUserId = source.userId ? Number(source.userId) : null;
+    const targetEmail = source.email ? String(source.email).trim().toLowerCase() : '';
+    const requesterId = source.requesterId ? Number(source.requesterId) : null;
+    const requesterEmail = source.requesterEmail ? String(source.requesterEmail).trim().toLowerCase() : '';
+
+    const ws = await db.query.workspaces.findFirst({ where: eq(workspaces.id, req.params.id) });
+    if (!ws) return res.status(404).json({ error: 'Workspace not found' });
+
+    const members = await db.select().from(workspaceMembers).where(eq(workspaceMembers.workspaceId, ws.id));
+    const targets = members.filter((m) => {
+      if (m.role === 'owner' || (m.userId && m.userId === ws.ownerId)) return false;
+      if (memberId !== null && m.id === memberId) return true;
+      if (targetUserId !== null && m.userId === targetUserId) return true;
+      if (targetEmail && m.email.toLowerCase() === targetEmail) return true;
+      return false;
+    });
+
+    if (targets.length === 0) {
+      return res.status(404).json({ error: 'Collaborator membership not found' });
+    }
+
+    const isOwnerRequester =
+      (requesterId !== null && ws.ownerId === requesterId) ||
+      Boolean(requesterEmail && members.some((m) => m.role === 'owner' && m.email.toLowerCase() === requesterEmail));
+    const isSelfRequester = targets.some(
+      (t) =>
+        (requesterId !== null && t.userId === requesterId) ||
+        Boolean(requesterEmail && t.email.toLowerCase() === requesterEmail)
+    );
+
+    if (!isOwnerRequester && !isSelfRequester) {
+      return res.status(403).json({ error: 'Only the workspace owner or the collaborator themselves can remove access' });
+    }
+
+    for (const t of targets) {
+      await db.delete(workspaceMembers).where(eq(workspaceMembers.id, t.id));
+    }
+
+    const remainingMembers = await db.select().from(workspaceMembers).where(eq(workspaceMembers.workspaceId, ws.id));
+    res.json({
+      success: true,
+      removed: targets,
+      members: remainingMembers,
+    });
+  } catch (error: any) {
+    console.error('Remove workspace collaborator error:', error);
+    res.status(500).json({ error: 'Failed to remove workspace collaborator' });
+  }
+});
+
 // ============================================================================
 // Stage 2: Statutory & Tax Screening Engine (Built-in CIPA `cipaget` + BURS)
 // ============================================================================
@@ -1630,6 +1698,177 @@ app.post('/api/screening/batch', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Batch screening error:', error);
     res.status(500).json({ error: 'Failed to run batch statutory screening' });
+  }
+});
+
+// CEDA Workspace AI Copilot (OpenAI-powered, grounded in full workspace index)
+app.post('/api/ai/assistant', async (req: Request, res: Response) => {
+  try {
+    const {
+      prompt,
+      history = [],
+      workspaceIndex = {},
+      userRole = 'Administrator',
+      aiAllowAutoScreen = true,
+      aiAllowAutoAssign = true,
+    } = req.body || {};
+
+    if (!prompt || !String(prompt).trim()) {
+      return res.status(400).json({ error: 'Prompt is required' });
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: 'OPENAI_API_KEY is not configured in .env' });
+    }
+
+    // Enrich with live PostgreSQL telemetry if DB is available
+    let dbTelemetry: Record<string, any> = {};
+    try {
+      const [userRows, innovationRows, evalRows, adjRows] = await Promise.all([
+        db.select().from(users).limit(100),
+        db.select().from(innovations).orderBy(desc(innovations.createdAt)).limit(200),
+        db.select().from(evaluations).limit(200),
+        db.select().from(adjudications).limit(200),
+      ]);
+      dbTelemetry = {
+        dbUsersCount: userRows.length,
+        dbInnovationsCount: innovationRows.length,
+        dbEvaluationsCount: evalRows.length,
+        dbAdjudicationsCount: adjRows.length,
+      };
+    } catch {
+      // Proceed cleanly with client-indexed workspace telemetry
+    }
+
+    const systemPrompt = [
+      'You are CEDA Workspace AI, an intelligent operational assistant embedded inside the Botswana Citizen Entrepreneurial Development Agency (CEDA) Innovation Canvas.',
+      `Current user role: ${userRole}.`,
+      `Admin Settings Permissions -> AI Auto-Verify Screening Allowed: ${Boolean(aiAllowAutoScreen)}, AI Auto-Assign Queue Allowed: ${Boolean(aiAllowAutoAssign)}.`,
+      'You have complete indexed visibility into the entire CEDA platform below: personnel (Evaluators, Adjudicators, Agents, Admins), overdue/behind-SLA reviewers, Intake Queue ideas, Assigned ideas, Adjudication Queue ideas, Projects, Active Workflow Cycle stages, Citizen Application Form Builder fields, Admin FAQs, and Submitter System Feedback.',
+      'Answer concisely, accurately, and using exact numbers, names, idea codes, and stage details from the indexed snapshot.',
+      'When counting evaluators or adjudicators behind on evaluations/adjudications, cite their exact names, counts, and which ideas are overdue or approaching SLA.',
+      'Only invoke the executable tools when an Administrator explicitly asks you to verify/screen queued ideas or assign queued ideas (and respect the Admin Settings permissions above).',
+      '',
+      '=== INDEXED WORKSPACE DATA ===',
+      JSON.stringify({ ...workspaceIndex, dbTelemetry }),
+    ].join('\n');
+
+    const tools =
+      userRole === 'Administrator'
+        ? [
+            {
+              type: 'function',
+              function: {
+                name: 'verify_all_queue_ideas',
+                description:
+                  'Run automated Stage 2 CIPA Company Registry & BURS Tax Clearance verification across all ideas currently in the Admin Intake Queue.',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    reason: {
+                      type: 'string',
+                      description: 'Short explanation of why screening is being run.',
+                    },
+                  },
+                },
+              },
+            },
+            {
+              type: 'function',
+              function: {
+                name: 'assign_queue_ideas',
+                description:
+                  'Automatically load-balance and assign eligible ideas from the queue to available Evaluators (or Adjudication Queue ideas to Adjudicators).',
+                parameters: {
+                  type: 'object',
+                  properties: {
+                    targetQueue: {
+                      type: 'string',
+                      enum: ['ideas', 'adjudication', 'both'],
+                      description: 'Which queue to assign from.',
+                    },
+                    maxCount: {
+                      type: 'number',
+                      description: 'Optional cap on number of ideas to assign.',
+                    },
+                  },
+                  required: ['targetQueue'],
+                },
+              },
+            },
+          ]
+        : [];
+
+    const recentMessages = Array.isArray(history)
+      ? history
+          .slice(-8)
+          .filter((m: any) => m && (m.role === 'user' || m.role === 'assistant') && typeof m.content === 'string')
+          .map((m: any) => ({ role: m.role, content: m.content }))
+      : [];
+
+    const openaiBody: Record<string, any> = {
+      model: 'gpt-4o-mini',
+      temperature: 0.2,
+      messages: [
+        { role: 'system', content: systemPrompt },
+        ...recentMessages,
+        { role: 'user', content: String(prompt).trim() },
+      ],
+    };
+
+    if (tools.length > 0) {
+      openaiBody.tools = tools;
+      openaiBody.tool_choice = 'auto';
+    }
+
+    const aiRes = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(openaiBody),
+    });
+
+    const aiJson: any = await aiRes.json();
+    if (!aiRes.ok) {
+      console.error('OpenAI API error:', aiJson);
+      return res.status(aiRes.status).json({
+        error: aiJson?.error?.message || 'OpenAI request failed',
+      });
+    }
+
+    const choice = aiJson?.choices?.[0]?.message || {};
+    const toolCalls = Array.isArray(choice.tool_calls) ? choice.tool_calls : [];
+    const actions: { type: 'verify_all_queue_ideas' | 'assign_queue_ideas'; args?: any }[] = [];
+
+    for (const tc of toolCalls) {
+      const fnName = tc?.function?.name;
+      let parsedArgs: any = {};
+      try {
+        parsedArgs = tc?.function?.arguments ? JSON.parse(tc.function.arguments) : {};
+      } catch {
+        parsedArgs = {};
+      }
+      if (fnName === 'verify_all_queue_ideas' || fnName === 'assign_queue_ideas') {
+        actions.push({ type: fnName, args: parsedArgs });
+      }
+    }
+
+    res.json({
+      answer:
+        typeof choice.content === 'string' && choice.content.trim()
+          ? choice.content.trim()
+          : actions.length > 0
+            ? 'Executing requested queue operation across the active workspace.'
+            : 'Completed workspace analysis.',
+      actions,
+      model: aiJson?.model || 'gpt-4o-mini',
+    });
+  } catch (error: any) {
+    console.error('AI assistant endpoint error:', error);
+    res.status(500).json({ error: error?.message || 'Failed to contact AI assistant' });
   }
 });
 

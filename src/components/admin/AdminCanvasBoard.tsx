@@ -4,7 +4,8 @@ import {
   SubmissionBatchQueue, AdminPersonnel,
   CanvasDensity, WorkflowCycle, ApplicationFormField,
   QueueIdeaItem, CanvasEvaluatorStation, CanvasPoolContainer, AdminCanvasTool,
-  SubmitterEnquiryMessage, CanvasAnnotationItem, CanvasAnnotationType
+  SubmitterEnquiryMessage, CanvasAnnotationItem, CanvasAnnotationType,
+  AdjudicatorCollaborativeScore
 } from '../../types/ceda';
 import { ADMIN_CANVAS_TOOLS } from '../../data/mockData';
 import {
@@ -16,12 +17,13 @@ import {
   VolumeX, Play, Pause, Flame, Share2, Edit3, MessageSquare, Image, Palette, User, Star,
   Maximize2, Minimize2, CheckCheck, Square, MousePointerClick, Settings, Headphones,
   Send, Radio, BellRing, AlertTriangle, StickyNote, Tag, Bookmark, RotateCcw, X, Pencil, Shield, Rocket,
-  Keyboard, Save, Undo2, Redo2, Grid, MoreVertical, Paperclip
+  Keyboard, Save, Undo2, Redo2, Grid, MoreVertical, Paperclip, LogOut, ArrowLeft
 } from 'lucide-react';
 import {
   subscribeToClarificationChat,
   sendClarificationMessage,
   publishNotification,
+  subscribeToAllAdjudicatorScores,
   ClarificationChatMessage,
   WorkspaceCursorItem
 } from '../../lib/firebase';
@@ -94,8 +96,13 @@ interface AdminCanvasBoardProps {
   onResetCanvasToDefault?: () => void;
   onOpenShareWorkspace?: () => void;
   activeWorkspaceName?: string;
+  isWorkspaceOwner?: boolean;
+  activeWorkspaceOwnerId?: number;
   workspaceCollaborators?: WorkspaceCursorItem[];
   onPublishCursorPosition?: (canvasX: number, canvasY: number) => void;
+  onRemoveCollaborator?: (collab: { userId?: string | number | null; email?: string; userName?: string }) => Promise<void> | void;
+  onReturnToOwnWorkspace?: () => void;
+  onCancelCollaboration?: () => Promise<void> | void;
   canvasTheme?: 'slate_dots' | 'blueprint' | 'warm_paper' | 'dark_studio' | 'clean_grid';
   onCanvasThemeChange?: (theme: 'slate_dots' | 'blueprint' | 'warm_paper' | 'dark_studio' | 'clean_grid') => void;
   showGrid?: boolean;
@@ -128,8 +135,12 @@ interface AdminCanvasBoardProps {
   // Evaluator & Card Interactive Actions
   onOpenDossier?: (ideaId: string) => void;
   onOpenClarificationChat?: (idea: QueueIdeaItem) => void;
-  onAdvanceIdeaStage?: (ideaId: string) => void;
+  onAdvanceIdeaStage?: (ideaId: string, targetStepNumber?: number) => void;
   onRemoveIdeaFromCanvas?: (ideaId: string) => void;
+  onOpenAdjudicateModal?: (idea: QueueIdeaItem) => void;
+  onOpenFaqFeedbackAdmin?: (tab: 'faqs' | 'feedback') => void;
+  onOpenAiAssistant?: () => void;
+  isAiAssistantOpen?: boolean;
   adjudicationIdeas?: QueueIdeaItem[];
   // Stage 2: Statutory & Tax Screening (CIPA & BURS)
   enforceStatutoryGate?: boolean;
@@ -191,8 +202,13 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
   onResetCanvasToDefault,
   onOpenShareWorkspace,
   activeWorkspaceName,
+  isWorkspaceOwner = true,
+  activeWorkspaceOwnerId,
   workspaceCollaborators = [],
   onPublishCursorPosition,
+  onRemoveCollaborator,
+  onReturnToOwnWorkspace,
+  onCancelCollaboration,
   canvasTheme = 'slate_dots',
   onCanvasThemeChange,
   showGrid = true,
@@ -238,6 +254,10 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
   onOpenClarificationChat,
   onAdvanceIdeaStage,
   onRemoveIdeaFromCanvas,
+  onOpenAdjudicateModal,
+  onOpenFaqFeedbackAdmin,
+  onOpenAiAssistant,
+  isAiAssistantOpen = false,
   adjudicationIdeas: propAdjudicationIdeas,
   enforceStatutoryGate = true,
   onToggleEnforceStatutoryGate,
@@ -264,6 +284,63 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
         ? 'Agent Workspace'
         : 'Administration Workspace';
 
+  const sortedWorkflowStages = useMemo(() => {
+    const list = Array.isArray(workflowCycle?.stages) ? [...workflowCycle.stages] : [];
+    return list.sort((a, b) => a.stepNumber - b.stepNumber);
+  }, [workflowCycle?.stages]);
+
+  const adjudicationStartStage = useMemo(() => {
+    return (
+      sortedWorkflowStages.find((s) => s.stepNumber === 5 && s.assignedRole === 'Adjudicator') ||
+      sortedWorkflowStages.find((s) => s.assignedRole === 'Adjudicator') ||
+      sortedWorkflowStages.find((s) => s.stepNumber === 5) ||
+      sortedWorkflowStages[Math.min(4, Math.max(0, sortedWorkflowStages.length - 1))] || {
+        id: 'stg-5',
+        name: 'Adjudication Board Chamber',
+        stepNumber: 5,
+        assignedRole: 'Adjudicator' as const,
+        thresholdCriteria: 'Quorum Vote (>= 3/4)',
+        targetTurnaroundDays: 4,
+        color: '#16a34a',
+      }
+    );
+  }, [sortedWorkflowStages]);
+
+  const postAdjudicationStages = useMemo(
+    () => sortedWorkflowStages.filter((s) => s.stepNumber > adjudicationStartStage.stepNumber),
+    [sortedWorkflowStages, adjudicationStartStage.stepNumber]
+  );
+
+  const maxWorkflowStep = useMemo(
+    () => sortedWorkflowStages[sortedWorkflowStages.length - 1]?.stepNumber ?? adjudicationStartStage.stepNumber,
+    [sortedWorkflowStages, adjudicationStartStage.stepNumber]
+  );
+
+  const getAdjudicationIdeaStageState = (idea: QueueIdeaItem) => {
+    const baseStep = adjudicationStartStage.stepNumber;
+    const inferFromStageId = (stgId?: string) => {
+      if (stgId === 'pilot_phase') return baseStep + 1;
+      if (stgId === 'implementation') return baseStep + 2;
+      if (stgId === 'realized_impact') return Math.min(maxWorkflowStep, baseStep + 3);
+      return baseStep;
+    };
+    const rawStep = Number(idea.currentStepNumber ?? inferFromStageId(idea.stageId));
+    const currentStep = Math.max(baseStep, rawStep);
+    const activeStage =
+      sortedWorkflowStages.find((s) => s.stepNumber === currentStep) || adjudicationStartStage;
+    const nextStage = sortedWorkflowStages.find((s) => s.stepNumber > currentStep) || null;
+    const isGatePassed = currentStep > baseStep || Boolean(idea.finalWorkflowCompleted);
+    const isAllStagesDone = Boolean(idea.finalWorkflowCompleted) || currentStep > maxWorkflowStep;
+    return {
+      baseStep,
+      currentStep,
+      activeStage,
+      nextStage,
+      isGatePassed,
+      isAllStagesDone,
+    };
+  };
+
   const containerRef = useRef<HTMLDivElement>(null);
   const queueScrollRef = useRef<HTMLDivElement>(null);
   const [activeTool, setActiveTool] = useState<'select' | 'pan' | 'annotate'>('select');
@@ -271,9 +348,18 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
   const [startPan, setStartPan] = useState({ x: 0, y: 0 });
 
   // Triple-track Queue View: Ideas Queue vs Citizen Enquiry Messages vs Adjudication Queue
-  const [localQueueTab, setLocalQueueTab] = useState<'ideas' | 'messages' | 'adjudication'>(() => savedLayout.queueTab ?? 'ideas');
-  const queueTab = propQueueTab ?? localQueueTab;
+  const [localQueueTab, setLocalQueueTab] = useState<'ideas' | 'messages' | 'adjudication'>(() =>
+    isAdjudicator ? 'adjudication' : (savedLayout.queueTab ?? 'ideas')
+  );
+  const rawQueueTab = propQueueTab ?? localQueueTab;
+  const queueTab: 'ideas' | 'messages' | 'adjudication' = isAdjudicator ? 'adjudication' : rawQueueTab;
   const setQueueTab = onQueueTabChange ?? setLocalQueueTab;
+
+  useEffect(() => {
+    if (isAdjudicator && rawQueueTab !== 'adjudication') {
+      setQueueTab('adjudication');
+    }
+  }, [isAdjudicator, rawQueueTab, setQueueTab]);
 
   // Evaluator / Adjudicator Canvas Active Dropped Ideas
   const [evaluatorCanvasIdeaIds, setEvaluatorCanvasIdeaIds] = useState<string[]>(
@@ -283,6 +369,15 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
   // Real-time Clarification Comments per Idea
   const [ideaCommentsMap, setIdeaCommentsMap] = useState<Record<string, ClarificationChatMessage[]>>({});
   const [inlineCommentInput, setInlineCommentInput] = useState<Record<string, string>>({});
+
+  // Collaborative Adjudicator Scores keyed by innovationId / innovationCode
+  const [allAdjudicatorScores, setAllAdjudicatorScores] = useState<AdjudicatorCollaborativeScore[]>([]);
+  useEffect(() => {
+    const unsubScores = subscribeToAllAdjudicatorScores((scores) => {
+      setAllAdjudicatorScores(scores);
+    });
+    return () => unsubScores();
+  }, []);
 
   // Custom moved card positions on canvas (use parent workspace-synced state if provided)
   const [localIdeaCustomPositions, setLocalIdeaCustomPositions] = useState<Record<string, { x: number; y: number }>>(
@@ -791,7 +886,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
       .filter((item): item is QueueIdeaItem => {
         if (!item) return false;
         if (isAdjudicator) {
-          return (item.status as string) !== 'adjudicated' && (item as any).stageId !== 'pilot_phase';
+          return (item.status as string) !== 'archived_complete';
         }
         return item.status !== 'completed' && (item.status as string) !== 'adjudicated';
       });
@@ -1763,31 +1858,6 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
               +1 Ingest Stream Arrived!
             </span>
           )}
-
-          {workspaceCollaborators.length > 0 && (
-            <button
-              type="button"
-              onClick={onOpenShareWorkspace}
-              className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-800 text-[10.5px] font-bold cursor-pointer transition-colors"
-              title="Live users collaborating on this canvas right now"
-            >
-              <span className="flex -space-x-1.5">
-                {workspaceCollaborators.slice(0, 4).map((collab) => (
-                  <span
-                    key={String(collab.userId)}
-                    style={{ backgroundColor: collab.color || '#006194' }}
-                    className="w-4 h-4 rounded-full text-white text-[8px] font-extrabold flex items-center justify-center ring-1 ring-white"
-                  >
-                    {collab.userName.slice(0, 1).toUpperCase()}
-                  </span>
-                ))}
-              </span>
-              <span>
-                Live ({workspaceCollaborators.length}):{' '}
-                {workspaceCollaborators.map((c) => c.userName.split(' ')[0]).join(', ')}
-              </span>
-            </button>
-          )}
         </div>
 
         {/* Center / Right Control Strip */}
@@ -1835,6 +1905,19 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                 <Layers className="w-3.5 h-3.5" />
                 <span>Assign Ideas</span>
               </button>
+
+              {/* Admin FAQ & Feedback Provision */}
+              {onOpenFaqFeedbackAdmin && (
+                <button
+                  type="button"
+                  onClick={() => onOpenFaqFeedbackAdmin('faqs')}
+                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-amber-50 hover:bg-amber-100 text-amber-900 font-bold text-[11px] transition-colors border border-amber-200 cursor-pointer"
+                  title="Manage Submitter FAQs and inspect aggregated Submitter feedback"
+                >
+                  <HelpCircle className="w-3.5 h-3.5 text-amber-700" />
+                  <span>FAQs & Feedback</span>
+                </button>
+              )}
             </>
           )}
 
@@ -2052,7 +2135,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                   const p3 = `M ${start3X} ${start3Y} C ${start3X + dx3} ${start3Y}, ${end3X - dx3} ${end3Y}, ${end3X} ${end3Y}`;
 
                   const isApproved = isAdjudicator
-                    ? ((idea.status as string) === 'adjudicated' || (idea as any).stageId === 'pilot_phase')
+                    ? getAdjudicationIdeaStageState(idea).isGatePassed
                     : (idea.status === 'completed' || adjudicationIdeas.some((i) => i.id === idea.id));
 
                   return (
@@ -2199,23 +2282,25 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                         <h3 className="font-black text-slate-900 text-sm tracking-tight">Intake Queues</h3>
                       </div>
 
-                      {/* Dual-Track Tabs: Ideas vs Citizen Enquiry Messages (Enquiries restricted to Admin & Agent) */}
+                      {/* Dual-Track Tabs: Ideas vs Citizen Enquiry Messages (Enquiries restricted to Admin & Agent; Adjudicators only see Adjudication Queue) */}
                       <div className="flex items-center bg-slate-200/80 p-0.5 rounded-lg border border-slate-300 text-xs">
-                        <button
-                          onClick={() => setQueueTab('ideas')}
-                          className={`flex items-center gap-1.5 px-3 py-1 rounded-md font-bold transition-all ${queueTab === 'ideas'
-                            ? 'bg-white text-[#006194] shadow-xs'
-                            : 'text-slate-600 hover:text-slate-900'
-                            }`}
-                        >
-                          <span>💡 Ideas Queue</span>
-                          <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono-code ${queueTab === 'ideas' ? 'bg-sky-100 text-[#006194]' : 'bg-slate-300 text-slate-700'
-                            }`}>
-                            {sortedQueueIdeas.length}
-                          </span>
-                        </button>
+                        {!isAdjudicator && (
+                          <button
+                            onClick={() => setQueueTab('ideas')}
+                            className={`flex items-center gap-1.5 px-3 py-1 rounded-md font-bold transition-all ${queueTab === 'ideas'
+                              ? 'bg-white text-[#006194] shadow-xs'
+                              : 'text-slate-600 hover:text-slate-900'
+                              }`}
+                          >
+                            <span>💡 Ideas Queue</span>
+                            <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono-code ${queueTab === 'ideas' ? 'bg-sky-100 text-[#006194]' : 'bg-slate-300 text-slate-700'
+                              }`}>
+                              {sortedQueueIdeas.length}
+                            </span>
+                          </button>
+                        )}
 
-                        {canViewEnquiries && (
+                        {canViewEnquiries && !isAdjudicator && (
                           <button
                             onClick={() => setQueueTab('messages')}
                             className={`flex items-center gap-1.5 px-3 py-1 rounded-md font-bold transition-all ${queueTab === 'messages'
@@ -2232,7 +2317,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                           </button>
                         )}
 
-                        {/* 3. Adjudication Queue Tab (Available to both Admin & Evaluators) */}
+                        {/* 3. Adjudication Queue Tab (Available to Admin, Evaluators & Adjudicators) */}
                         <button
                           onClick={() => setQueueTab('adjudication')}
                           className={`flex items-center gap-1.5 px-3 py-1 rounded-md font-bold transition-all ${queueTab === 'adjudication'
@@ -2342,7 +2427,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                             </button>
                           )}
                         </>
-                      ) : (
+                      ) : queueTab === 'messages' ? (
                         /* Message Queue Controls: Simulation & Auto-Dispatch Engine Indicator */
                         <div className="flex items-center gap-2">
                           <button
@@ -2394,7 +2479,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                             {availableAgents.length} Agents • Max {maxChatsPerAgent}/agent
                           </span>
                         </div>
-                      )}
+                      ) : null}
 
                       <div className="w-[1px] h-4 bg-slate-200 mx-1" />
 
@@ -2434,8 +2519,8 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                       className="p-3.5 flex flex-row gap-3 overflow-x-auto scrollbar-thin scroll-smooth select-none items-stretch"
                       style={{ scrollbarWidth: 'thin' }}
                     >
-                      {/* Track 1: IDEAS QUEUE */}
-                      {queueTab === 'ideas' && (
+                      {/* Track 1: IDEAS QUEUE (Hidden for Adjudicators) */}
+                      {!isAdjudicator && queueTab === 'ideas' && (
                         sortedQueueIdeas.length === 0 ? (
                           <div className="w-full py-6 text-center text-slate-400">
                             <CheckCircle2 className="w-6 h-6 mx-auto mb-1 text-emerald-500" />
@@ -2832,7 +2917,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                 /* Empty Droppable Target on Canvas */
                 <div
                   style={{ left: 80, top: 80 }}
-                  className="absolute w-[560px] p-8 border-2 border-dashed border-amber-300 rounded-3xl bg-amber-50/50 text-center select-none shadow-xs z-20"
+                  className="absolute w-[620px] p-8 border-2 border-dashed border-amber-300 rounded-3xl bg-amber-50/50 text-center select-none shadow-xs z-20"
                 >
                   <div className="w-12 h-12 mx-auto mb-3 bg-amber-100 rounded-2xl flex items-center justify-center text-amber-800 shadow-2xs">
                     <Sparkles className="w-6 h-6 text-amber-600" />
@@ -2841,43 +2926,58 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                     {isAdjudicator ? 'Your Board Adjudication Canvas is Ready' : 'Your Technical Diligence Canvas is Ready'}
                   </h3>
                   <p className="text-xs text-slate-500 mt-1 max-w-md mx-auto leading-relaxed">
-                    Drag any proposal from the <strong>{isAdjudicator ? 'Assigned Adjudications' : 'Assigned Evaluations'}</strong> sidebar on the left or the <strong>Ideas Queue</strong> above and drop it here onto the canvas.
+                    Drag any proposal from the <strong>{isAdjudicator ? 'Assigned Adjudications' : 'Assigned Evaluations'}</strong> sidebar on the left or the <strong>{isAdjudicator ? 'Adjudication Queue' : 'Ideas Queue'}</strong> above and drop it here onto the canvas.
                   </p>
-                  <div className="mt-5 inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-white border border-amber-200 text-amber-900 font-bold text-[11px] shadow-2xs">
-                    <span>● 1. Idea Intake</span>
-                    <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
-                    <span>Comments & Clarity</span>
-                    <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
-                    <span>Approval Gate</span>
-                    <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
-                    <span>{isAdjudicator ? 'Pilot Phase' : 'Adjudication Queue'}</span>
-                  </div>
+                  {isAdjudicator ? (
+                    <div className="mt-5 inline-flex flex-wrap items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl bg-white border border-purple-200 text-purple-900 font-bold text-[10.5px] shadow-2xs">
+                      <span>● {adjudicationStartStage.stepNumber}. {adjudicationStartStage.name}</span>
+                      {postAdjudicationStages.map((stg) => (
+                        <React.Fragment key={stg.id}>
+                          <ArrowRight className="w-3 h-3 text-purple-500" />
+                          <span>{stg.stepNumber}. {stg.name}</span>
+                        </React.Fragment>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="mt-5 inline-flex items-center gap-2 px-3.5 py-1.5 rounded-xl bg-white border border-amber-200 text-amber-900 font-bold text-[11px] shadow-2xs">
+                      <span>● 1. Idea Intake</span>
+                      <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Comments & Clarity</span>
+                      <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Approval Gate</span>
+                      <ArrowRight className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Adjudication Queue</span>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <>
-                  {/* Top Header Pill: 1. Idea Intake with Active Count & Options Menu (Draggable) */}
+                  {/* Top Header Pill: 1. Idea Intake (Evaluator) OR Stage 5+ Adjudication Start (Adjudicator) */}
                   {(() => {
                     const rawHeader = ideaCustomPositions['__intake_header__'];
                     const headerPos = (rawHeader && (!isQueueCollapsed && rawHeader.y < 240 ? { x: rawHeader.x, y: 255 } : rawHeader)) || {
                       x: 60,
                       y: isQueueCollapsed ? 80 : 255,
                     };
+                    const headerLabel = isAdjudicator
+                      ? `${adjudicationStartStage.stepNumber}. ${adjudicationStartStage.name}`
+                      : '1. Idea Intake';
                     return (
                       <div
                         style={{ left: headerPos.x, top: headerPos.y }}
                         onMouseDown={(e) => startDragCard('idea', '__intake_header__', headerPos.x, headerPos.y, e)}
                         className="absolute z-25 flex items-center gap-3 bg-white border-2 border-slate-200 hover:border-[#006194] shadow-md hover:shadow-lg px-4 py-2 rounded-full select-none cursor-move group transition-all"
-                        title="Click and drag to move '1. Idea Intake' heading anywhere on canvas"
+                        title={`Click and drag to move '${headerLabel}' heading anywhere on canvas`}
                       >
                         <GripVertical className="w-3.5 h-3.5 text-slate-300 group-hover:text-[#006194] transition-colors" />
-                        <span className="w-2.5 h-2.5 rounded-full bg-[#006194] animate-pulse" />
-                        <span className="font-bold text-xs text-slate-900 tracking-tight">1. Idea Intake</span>
-                        <span className="bg-sky-100 text-[#006194] font-mono-code font-bold text-[11px] px-2.5 py-0.5 rounded-full">
+                        <span className={`w-2.5 h-2.5 rounded-full animate-pulse ${isAdjudicator ? 'bg-purple-600' : 'bg-[#006194]'}`} />
+                        <span className="font-bold text-xs text-slate-900 tracking-tight">{headerLabel}</span>
+                        <span className={`font-mono-code font-bold text-[11px] px-2.5 py-0.5 rounded-full ${isAdjudicator ? 'bg-purple-100 text-purple-800' : 'bg-sky-100 text-[#006194]'}`}>
                           {evaluatorCanvasIdeas.length} Active
                         </span>
                         <button
                           type="button"
-                          title="Intake Options"
+                          title="Stage Options"
                           className="text-slate-400 hover:text-slate-600 cursor-pointer p-0.5"
                         >
                           <MoreVertical className="w-3.5 h-3.5" />
@@ -2892,11 +2992,12 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                     const ideaSize = getCardSize(idea.id, 340, 250);
                     const commentsSize = getCardSize(`${idea.id}__comments`, 360, 320);
                     const gateSize = getCardSize(`${idea.id}__gate`, 340, 320);
-                    const step2Size = getCardSize(`${idea.id}__step2`, 300, 320);
+                    const step2Size = getCardSize(`${idea.id}__step2`, isAdjudicator ? 340 : 300, isAdjudicator ? 410 : 320);
 
+                    const adjState = getAdjudicationIdeaStageState(idea);
                     const comments = ideaCommentsMap[idea.id] || [];
                     const isApproved = isAdjudicator
-                      ? ((idea.status as string) === 'adjudicated' || (idea as any).stageId === 'pilot_phase')
+                      ? adjState.isGatePassed
                       : (idea.status === 'completed' || adjudicationIdeas.some((i) => i.id === idea.id));
                     const currentComment = inlineCommentInput[idea.id] || '';
                     const hasDetachedSubCards = Boolean(
@@ -2905,6 +3006,11 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                       ideaCustomPositions[`eval__${idea.id}__gate`] ||
                       ideaCustomPositions[`eval__${idea.id}__step2`]
                     );
+                    const postFirstStep = postAdjudicationStages[0]?.stepNumber ?? adjState.baseStep + 1;
+                    const stageLabelRange =
+                      postAdjudicationStages.length > 0
+                        ? `Stages ${postFirstStep}–${maxWorkflowStep}: Following Lifecycle`
+                        : 'Next Lifecycle Stage';
 
                     return (
                       <div key={`eval-row-${idea.id}`} className="contents">
@@ -2912,11 +3018,15 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                         <div style={{ left: basePos.x, top: basePos.y - 38 }} className="absolute z-20 flex items-center gap-2 select-none">
                           <span
                             onMouseDown={(e) => startDragCard('idea', `eval__${idea.id}`, basePos.x, basePos.y, e)}
-                            className="px-3 py-1 rounded-full bg-slate-100 border border-slate-300 text-slate-800 font-bold text-[11px] shadow-2xs flex items-center gap-1.5 cursor-move hover:bg-slate-200 transition-colors"
+                            className={`px-3 py-1 rounded-full border font-bold text-[11px] shadow-2xs flex items-center gap-1.5 cursor-move transition-colors ${isAdjudicator ? 'bg-purple-50 border-purple-300 text-purple-900 hover:bg-purple-100' : 'bg-slate-100 border-slate-300 text-slate-800 hover:bg-slate-200'}`}
                             title="Drag entire 4-stage pipeline"
                           >
-                            <GripVertical className="w-3 h-3 text-slate-400" />
-                            <span>Step 1 of evaluation</span>
+                            <GripVertical className={`w-3 h-3 ${isAdjudicator ? 'text-purple-400' : 'text-slate-400'}`} />
+                            <span>
+                              {isAdjudicator
+                                ? `Stage ${adjState.baseStep}: ${adjudicationStartStage.name}`
+                                : 'Step 1 of evaluation'}
+                            </span>
                           </span>
                           {hasDetachedSubCards && (
                             <button
@@ -2946,7 +3056,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                             title="Drag comments column"
                           >
                             <GripVertical className="w-3 h-3 text-amber-500" />
-                            <span>date: 13-26 nov / Comments</span>
+                            <span>{isAdjudicator ? `Stage ${adjState.baseStep} Quorum & Comments` : 'date: 13-26 nov / Comments'}</span>
                           </span>
                         </div>
 
@@ -2957,7 +3067,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                             title="Drag approval gate column"
                           >
                             <GripVertical className="w-3 h-3 text-emerald-500" />
-                            <span>Approval gate</span>
+                            <span>{isAdjudicator ? `Stage ${adjState.baseStep} Approval Gate` : 'Approval gate'}</span>
                           </span>
                         </div>
 
@@ -2965,15 +3075,15 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                           <span
                             onMouseDown={(e) => startDragCard('idea', `eval__${idea.id}__step2`, step2Pos.x, step2Pos.y, e)}
                             className="px-3 py-1 rounded-full bg-purple-50 border border-purple-300 text-purple-900 font-bold text-[11px] shadow-2xs flex items-center gap-1.5 cursor-move hover:bg-purple-100 transition-colors"
-                            title="Drag adjudication board column"
+                            title="Drag following lifecycle stages column"
                           >
                             <GripVertical className="w-3 h-3 text-purple-500" />
-                            <span>Step 2 (moved to adjud...)</span>
+                            <span>{isAdjudicator ? stageLabelRange : 'Step 2 (moved to adjud...)'}</span>
                           </span>
                         </div>
 
                         {/* ---------------------------------------------------- */}
-                        {/* COLUMN 1: IDEA CARD UNDER STEP 1 OF EVALUATION       */}
+                        {/* COLUMN 1: IDEA CARD                                  */}
                         {/* ---------------------------------------------------- */}
                         <div
                           style={{ left: basePos.x, top: basePos.y, width: ideaSize.width, minHeight: ideaSize.height }}
@@ -2992,7 +3102,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                               <div className="flex items-center gap-1.5">
                                 <span className="text-[10px] font-bold text-slate-500 flex items-center gap-1">
                                   <Clock className="w-3 h-3 text-amber-600" />
-                                  ⏱ {idea.slaRemainingDays ?? 3.5}d left
+                                  ⏱ {isAdjudicator ? `${adjState.activeStage.targetTurnaroundDays}d SLA` : `${idea.slaRemainingDays ?? 3.5}d left`}
                                 </span>
                                 <button
                                   type="button"
@@ -3025,13 +3135,27 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
 
                             <div className="space-y-1 mb-3">
                               <div className="flex justify-between items-center text-[10px]">
-                                <span className="text-slate-500 font-medium">Evaluation SLA Progress:</span>
-                                <span className="font-extrabold text-slate-800">{idea.progress ?? 20}%</span>
+                                <span className="text-slate-500 font-medium">
+                                  {isAdjudicator
+                                    ? `Stage ${Math.min(adjState.currentStep, maxWorkflowStep)} / ${maxWorkflowStep} (${adjState.activeStage.name}):`
+                                    : 'Evaluation SLA Progress:'}
+                                </span>
+                                <span className="font-extrabold text-slate-800">
+                                  {isAdjudicator
+                                    ? (adjState.isAllStagesDone ? 100 : Math.min(100, Math.round((Math.min(adjState.currentStep, maxWorkflowStep) / maxWorkflowStep) * 100)))
+                                    : (idea.progress ?? 20)}%
+                                </span>
                               </div>
                               <div className="w-full bg-slate-200 rounded-full h-1.5 overflow-hidden">
                                 <div
-                                  className="h-full rounded-full bg-amber-500 transition-all duration-500"
-                                  style={{ width: `${idea.progress ?? 20}%` }}
+                                  className={`h-full rounded-full transition-all duration-500 ${isAdjudicator ? 'bg-purple-600' : 'bg-amber-500'}`}
+                                  style={{
+                                    width: `${
+                                      isAdjudicator
+                                        ? (adjState.isAllStagesDone ? 100 : Math.min(100, Math.round((Math.min(adjState.currentStep, maxWorkflowStep) / maxWorkflowStep) * 100)))
+                                        : (idea.progress ?? 20)
+                                    }%`,
+                                  }}
                                 />
                               </div>
                             </div>
@@ -3232,7 +3356,7 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                               <span className="font-extrabold text-slate-900 text-xs flex items-center gap-1.5">
                                 <GripVertical className="w-3.5 h-3.5 text-slate-300 group-hover:text-emerald-600 transition-colors" />
                                 <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                                <span>Approval Gate</span>
+                                <span>{isAdjudicator ? `Stage ${adjState.baseStep} Approval Gate` : 'Approval Gate'}</span>
                               </span>
                               <span
                                 className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${isApproved
@@ -3240,55 +3364,137 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                                   : 'bg-amber-50 text-amber-800 border-amber-200'
                                   }`}
                               >
-                                {isApproved ? 'Approved for Next Stage' : 'Pending Required Items'}
+                                {isApproved
+                                  ? (isAdjudicator ? `Stage ${adjState.baseStep} Cleared` : 'Approved for Next Stage')
+                                  : 'Pending Required Items'}
                               </span>
                             </div>
 
-                            {/* 4 Evaluation Stages Checklist */}
+                            {/* Checklist */}
                             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-2">
-                              Evaluation Gate Criteria:
+                              {isAdjudicator ? 'Adjudication Gate Criteria:' : 'Evaluation Gate Criteria:'}
                             </p>
-                            <div className="space-y-2 text-[11px]">
-                              <div className="flex items-center gap-2 p-1.5 rounded-lg bg-emerald-50/70 border border-emerald-200 text-emerald-950">
-                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                                <span className="font-semibold">1. Read through submitted idea</span>
+                            {isAdjudicator ? (
+                              <div className="space-y-2 text-[11px]">
+                                <div className="flex items-center gap-2 p-1.5 rounded-lg bg-emerald-50/70 border border-emerald-200 text-emerald-950">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                  <span className="font-semibold">1. Review technical &amp; CIPA/BURS dossier</span>
+                                </div>
+                                <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${comments.length > 0
+                                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                                  : 'bg-slate-50 border-slate-200 text-slate-600'
+                                  }`}>
+                                  <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${comments.length > 0 ? 'text-emerald-600' : 'text-slate-300'}`} />
+                                  <span className="font-semibold">2. Board quorum &amp; clarity notes ({comments.length})</span>
+                                </div>
+                                <div className="flex items-center gap-2 p-1.5 rounded-lg bg-emerald-50/70 border border-emerald-200 text-emerald-950">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                  <span className="font-semibold truncate" title={adjudicationStartStage.thresholdCriteria}>
+                                    3. Gate: {adjudicationStartStage.thresholdCriteria}
+                                  </span>
+                                </div>
+                                <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${isApproved
+                                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                                  : 'bg-slate-50 border-slate-200 text-slate-600'
+                                  }`}>
+                                  <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${isApproved ? 'text-emerald-600' : 'text-slate-300'}`} />
+                                  <span className="font-semibold">
+                                    4. Advance to {postAdjudicationStages[0] ? `Stage ${postAdjudicationStages[0].stepNumber}` : 'Next Stage'}
+                                  </span>
+                                </div>
                               </div>
-                              <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${comments.length > 0
-                                ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
-                                : 'bg-slate-50 border-slate-200 text-slate-600'
-                                }`}>
-                                <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${comments.length > 0 ? 'text-emerald-600' : 'text-slate-300'}`} />
-                                <span className="font-semibold">2. Seek clarity via comment chats ({comments.length})</span>
+                            ) : (
+                              <div className="space-y-2 text-[11px]">
+                                <div className="flex items-center gap-2 p-1.5 rounded-lg bg-emerald-50/70 border border-emerald-200 text-emerald-950">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                  <span className="font-semibold">1. Read through submitted idea</span>
+                                </div>
+                                <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${comments.length > 0
+                                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                                  : 'bg-slate-50 border-slate-200 text-slate-600'
+                                  }`}>
+                                  <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${comments.length > 0 ? 'text-emerald-600' : 'text-slate-300'}`} />
+                                  <span className="font-semibold">2. Seek clarity via comment chats ({comments.length})</span>
+                                </div>
+                                <div className="flex items-center gap-2 p-1.5 rounded-lg bg-emerald-50/70 border border-emerald-200 text-emerald-950">
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                  <span className="font-semibold">3. Request supporting documentation</span>
+                                </div>
+                                <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${isApproved
+                                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                                  : 'bg-slate-50 border-slate-200 text-slate-600'
+                                  }`}>
+                                  <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${isApproved ? 'text-emerald-600' : 'text-slate-300'}`} />
+                                  <span className="font-semibold">4. Approve for next step</span>
+                                </div>
                               </div>
-                              <div className="flex items-center gap-2 p-1.5 rounded-lg bg-emerald-50/70 border border-emerald-200 text-emerald-950">
-                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                                <span className="font-semibold">3. Request supporting documentation</span>
-                              </div>
-                              <div className={`flex items-center gap-2 p-1.5 rounded-lg border ${isApproved
-                                ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
-                                : 'bg-slate-50 border-slate-200 text-slate-600'
-                                }`}>
-                                <CheckCircle2 className={`w-3.5 h-3.5 shrink-0 ${isApproved ? 'text-emerald-600' : 'text-slate-300'}`} />
-                                <span className="font-semibold">4. Approve for next step</span>
-                              </div>
-                            </div>
+                            )}
                           </div>
 
                           {/* Approval Actions */}
-                          <div className="pt-2 border-t border-slate-100 mt-2">
+                          <div className="pt-2 border-t border-slate-100 mt-2 space-y-2">
+                            {isAdjudicator && onOpenAdjudicateModal && (() => {
+                              const idLower = String(idea.id || '').trim().toLowerCase();
+                              const codeLower = String(idea.code || '').trim().toLowerCase();
+                              const ideaScores = allAdjudicatorScores.filter(
+                                (sc) =>
+                                  String(sc.innovationId || '').trim().toLowerCase() === idLower ||
+                                  (codeLower && String(sc.innovationCode || '').trim().toLowerCase() === codeLower)
+                              );
+                              const avgScore =
+                                ideaScores.length > 0
+                                  ? (
+                                      ideaScores.reduce((sum, s) => sum + (s.totalScore || 0), 0) /
+                                      ideaScores.length
+                                    ).toFixed(1)
+                                  : null;
+
+                              return (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    onOpenAdjudicateModal(idea);
+                                  }}
+                                  className="w-full py-2 px-3 bg-purple-50 hover:bg-purple-100 text-purple-900 border border-purple-200 rounded-xl font-bold text-xs flex items-center justify-between gap-2 transition-colors cursor-pointer"
+                                >
+                                  <span className="flex items-center gap-1.5">
+                                    <Users className="w-3.5 h-3.5 text-purple-700" />
+                                    <span>Collaborative Panel Score</span>
+                                  </span>
+                                  <span className="font-mono-code text-[10.5px] px-2 py-0.5 rounded bg-white border border-purple-200 text-purple-800">
+                                    {avgScore ? `Avg ${avgScore}/100 (${ideaScores.length})` : 'Score Idea'}
+                                  </span>
+                                </button>
+                              );
+                            })()}
                             {isApproved ? (
                               <div className="w-full py-2 px-3 bg-emerald-100 text-emerald-900 border border-emerald-300 rounded-xl font-extrabold text-xs text-center flex items-center justify-center gap-1.5 shadow-2xs">
                                 <CheckCircle2 className="w-4 h-4 text-emerald-700" />
-                                <span>{isAdjudicator ? 'Sanctioned for Pilot Phase' : 'Approved for Adjudication'}</span>
+                                <span>
+                                  {isAdjudicator
+                                    ? `Stage ${adjState.baseStep} Approved → Stage ${Math.min(adjState.currentStep, maxWorkflowStep)} Active`
+                                    : 'Approved for Adjudication'}
+                                </span>
                               </div>
                             ) : (
                               <button
                                 type="button"
-                                onClick={() => onAdvanceIdeaStage?.(idea.id)}
+                                onClick={() =>
+                                  onAdvanceIdeaStage?.(
+                                    idea.id,
+                                    isAdjudicator ? (postAdjudicationStages[0]?.stepNumber ?? adjState.baseStep + 1) : undefined
+                                  )
+                                }
                                 className="w-full py-2.5 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-extrabold text-xs transition-colors flex items-center justify-center gap-2 shadow-xs cursor-pointer active:scale-98"
                               >
                                 <Rocket className="w-4 h-4" />
-                                <span>{isAdjudicator ? 'Approve Board Decision →' : 'Approve for Next Step →'}</span>
+                                <span>
+                                  {isAdjudicator
+                                    ? `Approve Stage ${adjState.baseStep} → ${postAdjudicationStages[0] ? `Stage ${postAdjudicationStages[0].stepNumber}` : 'Next'}`
+                                    : 'Approve for Next Step →'}
+                                </span>
                               </button>
                             )}
                           </div>
@@ -3316,39 +3522,118 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                         </div>
 
                         {/* ---------------------------------------------------- */}
-                        {/* COLUMN 4: STEP 2 NEXT STAGE                          */}
+                        {/* COLUMN 4: FOLLOWING WORKFLOW STAGES (6, 7, 8, 9...)  */}
                         {/* ---------------------------------------------------- */}
                         <div
                           style={{ left: step2Pos.x, top: step2Pos.y, width: step2Size.width, height: step2Size.height }}
                           onMouseDown={(e) => startDragCard('idea', `eval__${idea.id}__step2`, step2Pos.x, step2Pos.y, e)}
                           className={`absolute rounded-2xl shadow-md p-4 z-20 text-xs select-none border-2 flex flex-col justify-between transition-shadow cursor-move group ${isApproved
                             ? 'bg-purple-50/50 border-purple-400 hover:border-purple-500'
-                            : 'bg-slate-50/50 border-slate-300 hover:border-slate-400 opacity-80'
+                            : 'bg-slate-50/50 border-slate-300 hover:border-slate-400 opacity-90'
                             }`}
                         >
-                          <div>
+                          <div className="flex flex-col min-h-0 flex-1">
                             {/* Header */}
-                            <div className="flex items-center justify-between pb-2 border-b border-slate-200 mb-2.5 cursor-move">
-                              <span className="font-extrabold text-slate-900 text-xs flex items-center gap-1.5">
-                                <GripVertical className="w-3.5 h-3.5 text-slate-300 group-hover:text-purple-600 transition-colors" />
-                                <Award className="w-4 h-4 text-purple-600" />
-                                <span>{isAdjudicator ? 'Step 2: Pilot Phase Gate' : 'Step 2: Adjudication Board'}</span>
+                            <div className="flex items-center justify-between pb-2 border-b border-slate-200 mb-2.5 cursor-move shrink-0">
+                              <span className="font-extrabold text-slate-900 text-xs flex items-center gap-1.5 truncate">
+                                <GripVertical className="w-3.5 h-3.5 text-slate-300 group-hover:text-purple-600 transition-colors shrink-0" />
+                                <Award className="w-4 h-4 text-purple-600 shrink-0" />
+                                <span className="truncate">
+                                  {isAdjudicator
+                                    ? `Stages ${postFirstStep}–${maxWorkflowStep}`
+                                    : 'Step 2: Adjudication Board'}
+                                </span>
                               </span>
                               <span
-                                className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${isApproved
-                                  ? 'bg-purple-100 text-purple-900 border-purple-300'
-                                  : 'bg-slate-100 text-slate-600 border-slate-200'
+                                className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border shrink-0 ${adjState.isAllStagesDone && isAdjudicator
+                                  ? 'bg-emerald-100 text-emerald-900 border-emerald-300'
+                                  : isApproved
+                                    ? 'bg-purple-100 text-purple-900 border-purple-300'
+                                    : 'bg-slate-100 text-slate-600 border-slate-200'
                                   }`}
                               >
-                                {isApproved ? (isAdjudicator ? 'In Pilot Phase' : 'In Adjudication Queue') : 'Locked'}
+                                {isAdjudicator
+                                  ? adjState.isAllStagesDone
+                                    ? 'All Completed ✓'
+                                    : isApproved
+                                      ? `Stage ${adjState.currentStep} Active`
+                                      : 'Locked'
+                                  : isApproved
+                                    ? 'In Adjudication Queue'
+                                    : 'Locked'}
                               </span>
                             </div>
 
                             {/* Content */}
-                            {isApproved ? (
+                            {isAdjudicator ? (
+                              <div className="space-y-1.5 overflow-y-auto pr-0.5 flex-1">
+                                {postAdjudicationStages.map((stg) => {
+                                  const isStgDone = adjState.isAllStagesDone || adjState.currentStep > stg.stepNumber;
+                                  const isStgCurrent = isApproved && !adjState.isAllStagesDone && adjState.currentStep === stg.stepNumber;
+                                  const nextAfterStg = postAdjudicationStages.find((s) => s.stepNumber > stg.stepNumber);
+
+                                  return (
+                                    <div
+                                      key={stg.id}
+                                      className={`p-2 rounded-xl border transition-all ${
+                                        isStgDone
+                                          ? 'bg-emerald-50/90 border-emerald-200 text-emerald-950'
+                                          : isStgCurrent
+                                            ? 'bg-white border-purple-400 ring-2 ring-purple-200 shadow-xs text-slate-900'
+                                            : 'bg-white/60 border-slate-200 text-slate-500'
+                                      }`}
+                                    >
+                                      <div className="flex items-center justify-between gap-1.5">
+                                        <span className="font-bold text-[10.5px] flex items-center gap-1 min-w-0">
+                                          {isStgDone ? (
+                                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                          ) : isStgCurrent ? (
+                                            <span className="w-2 h-2 rounded-full bg-purple-600 animate-pulse shrink-0" />
+                                          ) : (
+                                            <Clock className="w-3 h-3 text-slate-400 shrink-0" />
+                                          )}
+                                          <span className="truncate">
+                                            {stg.stepNumber}. {stg.name}
+                                          </span>
+                                        </span>
+                                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 shrink-0">
+                                          {stg.targetTurnaroundDays}d
+                                        </span>
+                                      </div>
+
+                                      <div className="flex items-center justify-between gap-1 mt-1 text-[9.5px]">
+                                        <span className="truncate opacity-80">{stg.thresholdCriteria}</span>
+                                        <span className="font-semibold text-purple-700 shrink-0">{stg.assignedRole}</span>
+                                      </div>
+
+                                      {isStgCurrent && (
+                                        <button
+                                          type="button"
+                                          onClick={(e) => {
+                                            e.preventDefault();
+                                            e.stopPropagation();
+                                            onAdvanceIdeaStage?.(
+                                              idea.id,
+                                              nextAfterStg ? nextAfterStg.stepNumber : maxWorkflowStep + 1
+                                            );
+                                          }}
+                                          className="mt-1.5 w-full py-1 px-2 rounded-lg bg-purple-600 hover:bg-purple-700 text-white font-bold text-[10px] transition-colors flex items-center justify-center gap-1 cursor-pointer"
+                                        >
+                                          <span>
+                                            {nextAfterStg
+                                              ? `Complete Stage ${stg.stepNumber} → Stage ${nextAfterStg.stepNumber}`
+                                              : `Complete Final Stage ${stg.stepNumber} ✓`}
+                                          </span>
+                                        </button>
+                                      )}
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            ) : isApproved ? (
                               <div className="space-y-3">
                                 <div className="p-2.5 rounded-xl bg-purple-100/70 border border-purple-200 text-purple-950 text-[11px] leading-relaxed">
-                                  <strong>🎉 {isAdjudicator ? 'Board Approved!' : 'Successfully Promoted!'}</strong> This proposal has cleared {isAdjudicator ? 'Stage 5 Board Adjudication and entered Stage 6 Pilot Phase.' : <>and is officially in the <strong>Adjudication Queue</strong> ready for National Board statutory quorum voting and capital sanctioning.</>}
+                                  <strong>🎉 Successfully Promoted!</strong> This proposal is officially in the <strong>Adjudication Queue</strong> ready for National Board statutory quorum voting and capital sanctioning.
                                 </div>
                                 <div className="text-[11px] text-slate-600 space-y-1">
                                   <div className="flex justify-between">
@@ -3366,23 +3651,53 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
                                 <Award className="w-8 h-8 mx-auto mb-2 opacity-30 text-slate-400" />
                                 <p className="text-xs font-semibold text-slate-600">Awaiting Approval Gate</p>
                                 <p className="text-[10.5px] text-slate-400 mt-1 leading-snug">
-                                  {isAdjudicator
-                                    ? 'Complete board adjudication review and approve at the gate to advance into Stage 6 Pilot Phase.'
-                                    : 'Complete Step 1 evaluation and approve the proposal at the Approval Gate to stream into the Adjudication Queue.'}
+                                  Complete Step 1 evaluation and approve the proposal at the Approval Gate to stream into the Adjudication Queue.
                                 </p>
                               </div>
                             )}
                           </div>
 
                           {/* Action Button */}
-                          <div className="pt-2 border-t border-slate-200 mt-2">
-                            {isApproved ? (
+                          <div className="pt-2 border-t border-slate-200 mt-2 shrink-0">
+                            {isAdjudicator ? (
+                              adjState.isAllStagesDone ? (
+                                <button
+                                  type="button"
+                                  onClick={() => onAdvanceIdeaStage?.(idea.id, -1)}
+                                  className="w-full py-2 px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
+                                >
+                                  <CheckCircle2 className="w-4 h-4" />
+                                  <span>Archive Completed Dossier ✓</span>
+                                </button>
+                              ) : isApproved ? (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    onAdvanceIdeaStage?.(
+                                      idea.id,
+                                      adjState.nextStage ? adjState.nextStage.stepNumber : maxWorkflowStep + 1
+                                    )
+                                  }
+                                  className="w-full py-2 px-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
+                                >
+                                  <span>
+                                    {adjState.nextStage
+                                      ? `Advance Stage ${adjState.currentStep} → Stage ${adjState.nextStage.stepNumber}`
+                                      : `Finish Stage ${adjState.currentStep} (${adjState.activeStage.name}) ✓`}
+                                  </span>
+                                </button>
+                              ) : (
+                                <div className="w-full py-2 px-3 bg-slate-100 text-slate-400 rounded-xl font-medium text-[11px] text-center border border-slate-200">
+                                  Locked — Clear Stage {adjState.baseStep} Gate First
+                                </div>
+                              )
+                            ) : isApproved ? (
                               <button
                                 type="button"
                                 onClick={() => setQueueTab('adjudication')}
                                 className="w-full py-2 px-3 bg-purple-600 hover:bg-purple-700 text-white rounded-xl font-bold text-xs transition-colors flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
                               >
-                                <span>{isAdjudicator ? 'Pilot Phase Sanctioned ✓' : 'View in Adjudication Queue →'}</span>
+                                <span>View in Adjudication Queue →</span>
                               </button>
                             ) : (
                               <div className="w-full py-2 px-3 bg-slate-100 text-slate-400 rounded-xl font-medium text-xs text-center border border-slate-200">
@@ -4717,6 +5032,25 @@ export const AdminCanvasBoard: React.FC<AdminCanvasBoardProps> = ({
             >
               Fit
             </button>
+
+            {onOpenAiAssistant && (isAdmin || isEvaluator || isAdjudicator) && (
+              <>
+                <div className="w-[1px] h-4 bg-slate-200 mx-1" />
+                <button
+                  type="button"
+                  onClick={onOpenAiAssistant}
+                  title="CEDA Workspace AI Copilot (Indexed across Admin, Evaluator & Adjudicator workspaces)"
+                  className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    isAiAssistantOpen
+                      ? 'bg-[#006194] text-white shadow-xs'
+                      : 'bg-sky-50 hover:bg-sky-100 text-[#006194]'
+                  }`}
+                >
+                  <Sparkles className={`w-3.5 h-3.5 ${isAiAssistantOpen ? 'text-amber-300' : 'text-[#006194]'}`} />
+                  <span>AI</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 

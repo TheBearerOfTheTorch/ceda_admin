@@ -1,26 +1,163 @@
-import React from 'react';
-import { ProjectCardData, QueueIdeaItem } from '../../types/ceda';
+import React, { useMemo } from 'react';
+import { ProjectCardData, QueueIdeaItem, WorkflowCycle } from '../../types/ceda';
 import { PIPELINE_STAGES } from '../../data/mockData';
 import { useAuth } from '../../context/AuthContext';
-import { 
-  BarChart3, TrendingUp, Users, Banknote, ShieldAlert, 
-  MapPin, CheckCircle, PieChart, Layers, ArrowUpRight,
-  Clock, Award, Building, FileText, CheckCircle2, ShieldCheck, Sparkles
+import { loadAllLifecycleRecords, mapWorkflowStagesToPipelineStages } from '../../lib/stageJourneyStore';
+import {
+  TrendingUp, Users, Banknote, CheckCircle, Layers,
+  Clock, CheckCircle2, Sparkles, Inbox, Award
 } from 'lucide-react';
 
 interface AnalyticsViewProps {
   projects: ProjectCardData[];
   assignedIdeas?: QueueIdeaItem[];
   activeWorkspaceName?: string;
+  queueIdeas?: QueueIdeaItem[];
+  allAssignedIdeas?: QueueIdeaItem[];
+  adjudicationIdeas?: QueueIdeaItem[];
+  workflowCycle?: WorkflowCycle;
 }
 
-export const AnalyticsView: React.FC<AnalyticsViewProps> = ({ 
+export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
   projects,
   assignedIdeas = [],
   activeWorkspaceName = 'My Workspace',
+  queueIdeas = [],
+  allAssignedIdeas = [],
+  adjudicationIdeas = [],
+  workflowCycle,
 }) => {
   const { currentUser } = useAuth();
   const isAdmin = currentUser?.role === 'Administrator';
+
+  const dynamicStages = useMemo(
+    () => mapWorkflowStagesToPipelineStages(workflowCycle),
+    [workflowCycle]
+  );
+
+  // Deduplicated macro pipeline reporting across incoming queue, active stations, adjudication, projects & lifecycle store
+  const adminPipelineSummary = useMemo(() => {
+    const lifecycleRecords = loadAllLifecycleRecords();
+    const maxStep = dynamicStages.reduce((m, s) => Math.max(m, s.number), dynamicStages.length || 8);
+
+    interface TrackedIdeaTelemetry {
+      key: string;
+      stageId: string;
+      stepNumber?: number;
+      funding: number;
+      isFinalized: boolean;
+      isRejected: boolean;
+    }
+
+    const tracked = new Map<string, TrackedIdeaTelemetry>();
+    const normalizeKey = (id?: string | number, title?: string) => {
+      const cleanTitle = (title || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, ' ');
+      return cleanTitle || String(id || '');
+    };
+
+    projects.forEach((p) => {
+      const key = normalizeKey(p.id, p.title);
+      if (!key) return;
+      const isFinalized =
+        p.stageId === 'realized_impact' ||
+        p.stageId === 'implementation' && maxStep <= 7 ||
+        (p as any).status === 'completed';
+      tracked.set(key, {
+        key,
+        stageId: p.stageId,
+        funding: p.fundingRequested || 0,
+        isFinalized,
+        isRejected: false,
+      });
+    });
+
+    const mergeQueueLike = (item: QueueIdeaItem, defaultStageId: string) => {
+      const key = normalizeKey(item.id, item.title);
+      if (!key) return;
+      const itemAny = item as any;
+      const isFinalized =
+        Boolean(item.finalWorkflowCompleted) ||
+        (item.status as string) === 'archived_complete' ||
+        (typeof item.currentStepNumber === 'number' && item.currentStepNumber >= maxStep) ||
+        item.stageId === 'realized_impact';
+      const inferredStage =
+        item.stageId ||
+        (item.status === 'adjudicated'
+          ? 'pilot_phase'
+          : item.status === 'completed'
+            ? 'approval_board'
+            : defaultStageId);
+      const prev = tracked.get(key);
+      tracked.set(key, {
+        key,
+        stageId: inferredStage,
+        stepNumber: item.currentStepNumber,
+        funding: Math.max(prev?.funding || 0, item.capitalAsk || itemAny.fundingRequested || 0),
+        isFinalized: Boolean(prev?.isFinalized || isFinalized),
+        isRejected: Boolean(prev?.isRejected || item.screening?.status === 'rejected'),
+      });
+    };
+
+    queueIdeas.forEach((q) => mergeQueueLike(q, 'intake'));
+    allAssignedIdeas.forEach((a) => mergeQueueLike(a, 'evaluation'));
+    adjudicationIdeas.forEach((adj) => mergeQueueLike(adj, 'approval_board'));
+
+    Object.values(lifecycleRecords).forEach((lc) => {
+      const key = normalizeKey(lc.ideaId, lc.title);
+      if (!key) return;
+      const isFinalized =
+        lc.overallStatus === 'completed' ||
+        lc.overallStatus === 'rejected' ||
+        lc.currentStageId === 'realized_impact';
+      const prev = tracked.get(key);
+      if (!prev) {
+        tracked.set(key, {
+          key,
+          stageId: lc.currentStageId || 'intake',
+          funding: lc.capitalAsk || 0,
+          isFinalized,
+          isRejected: lc.overallStatus === 'rejected',
+        });
+      } else {
+        tracked.set(key, {
+          ...prev,
+          stageId: lc.currentStageId || prev.stageId,
+          funding: Math.max(prev.funding, lc.capitalAsk || 0),
+          isFinalized: prev.isFinalized || isFinalized,
+          isRejected: prev.isRejected || lc.overallStatus === 'rejected',
+        });
+      }
+    });
+
+    const items = Array.from(tracked.values());
+    const totalReceived = items.length;
+    const finalizedCount = items.filter((i) => i.isFinalized).length;
+    const rejectedCount = items.filter((i) => i.isRejected).length;
+    const inEvaluationCount = Math.max(0, totalReceived - finalizedCount);
+
+    const stageBreakdown = dynamicStages.map((st, idx) => {
+      const matching = items.filter((item) => {
+        if (typeof item.stepNumber === 'number') {
+          return item.stepNumber === st.number;
+        }
+        const firstMatchIdx = dynamicStages.findIndex((d) => d.id === item.stageId);
+        return firstMatchIdx === idx;
+      });
+      return {
+        stage: st,
+        count: matching.length,
+        funding: matching.reduce((s, m) => s + m.funding, 0),
+      };
+    });
+
+    return {
+      totalReceived,
+      finalizedCount,
+      rejectedCount,
+      inEvaluationCount,
+      stageBreakdown,
+    };
+  }, [projects, queueIdeas, allAssignedIdeas, adjudicationIdeas, dynamicStages]);
 
   const formatBWP = (amount: number) => {
     return new Intl.NumberFormat('en-BW', {
@@ -265,6 +402,60 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         </div>
       </div>
 
+      {/* Admin Pipeline Reporting Summary: Ideas Received, Workflow Evaluation Levels & Finalized */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-white border border-sky-200 rounded-xl p-4 shadow-xs flex items-center justify-between">
+          <div>
+            <div className="text-[11px] font-mono-code font-bold uppercase text-sky-700">
+              Total Ideas Received
+            </div>
+            <div className="text-2xl font-extrabold font-mono-code text-slate-900 mt-1">
+              {adminPipelineSummary.totalReceived} Ideas
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1">
+              Queue ({queueIdeas.length}) • Assigned ({allAssignedIdeas.length}) • Board ({adjudicationIdeas.length})
+            </div>
+          </div>
+          <div className="w-10 h-10 rounded-xl bg-sky-50 text-[#006194] flex items-center justify-center border border-sky-100">
+            <Inbox className="w-5 h-5" />
+          </div>
+        </div>
+
+        <div className="bg-white border border-amber-200 rounded-xl p-4 shadow-xs flex items-center justify-between">
+          <div>
+            <div className="text-[11px] font-mono-code font-bold uppercase text-amber-700">
+              Active In Workflow Evaluation
+            </div>
+            <div className="text-2xl font-extrabold font-mono-code text-slate-900 mt-1">
+              {adminPipelineSummary.inEvaluationCount} Ideas
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1">
+              Currently progressing across Stages 1–{Math.max(1, dynamicStages.length - 1)}
+            </div>
+          </div>
+          <div className="w-10 h-10 rounded-xl bg-amber-50 text-amber-700 flex items-center justify-center border border-amber-100">
+            <Layers className="w-5 h-5" />
+          </div>
+        </div>
+
+        <div className="bg-white border border-emerald-200 rounded-xl p-4 shadow-xs flex items-center justify-between">
+          <div>
+            <div className="text-[11px] font-mono-code font-bold uppercase text-emerald-700">
+              Finalized Ideas
+            </div>
+            <div className="text-2xl font-extrabold font-mono-code text-emerald-700 mt-1">
+              {adminPipelineSummary.finalizedCount} Finalized
+            </div>
+            <div className="text-[11px] text-slate-500 mt-1">
+              Completed / Archived • {adminPipelineSummary.rejectedCount} Rejected
+            </div>
+          </div>
+          <div className="w-10 h-10 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center border border-emerald-100">
+            <Award className="w-5 h-5" />
+          </div>
+        </div>
+      </div>
+
       {/* KPI Cards Row */}
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-white border border-[#e2e8f0] rounded-xl p-4 shadow-xs">
@@ -321,35 +512,33 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
         </div>
       </div>
 
-      {/* 8-Stage Funnel Throughput Visualizer */}
+      {/* Dynamic Workflow Evaluation Level Throughput Visualizer */}
       <div className="bg-white border border-[#e2e8f0] rounded-xl p-5 shadow-xs">
-        <h2 className="text-sm font-bold font-mono-code uppercase text-slate-700 mb-4 flex items-center justify-between">
-          <span>8-Stage National Innovation Pipeline Velocity</span>
-          <span className="text-xs font-normal text-slate-500">Intake to Realized Economic Impact</span>
+        <h2 className="text-sm font-bold font-mono-code uppercase text-slate-700 mb-4 flex items-center justify-between flex-wrap gap-2">
+          <span>{dynamicStages.length}-Stage Workflow Evaluation Level Breakdown</span>
+          <span className="text-xs font-normal text-slate-500">
+            {adminPipelineSummary.totalReceived} Received • {adminPipelineSummary.inEvaluationCount} In Evaluation • {adminPipelineSummary.finalizedCount} Finalized
+          </span>
         </h2>
 
-        <div className="grid grid-cols-8 gap-2">
-          {PIPELINE_STAGES.map((st) => {
-            const count = projects.filter(p => p.stageId === st.id).length;
-            const funding = projects.filter(p => p.stageId === st.id).reduce((s, p) => s + p.fundingRequested, 0);
-
-            return (
+        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
+          {adminPipelineSummary.stageBreakdown.map(({ stage: st, count, funding }, sIdx) => (
               <div
-                key={st.id}
+                key={`${st.id}-${st.number}-${sIdx}`}
                 style={{ borderTopColor: st.color, borderTopWidth: '3px' }}
                 className="bg-slate-50/70 border border-slate-200 rounded-lg p-3 flex flex-col justify-between h-40"
               >
                 <div>
                   <div className="flex items-center justify-between text-xs mb-1">
-                    <span className="font-mono-code text-[11px] font-bold text-slate-500">{st.tagPrefix}</span>
-                    <span 
+                    <span className="font-mono-code text-[11px] font-bold text-slate-500">S{st.number} • {st.tagPrefix}</span>
+                    <span
                       style={{ backgroundColor: st.bgColor, color: st.color }}
-                      className="w-5 h-5 rounded-full flex items-center justify-center font-bold text-[10px] font-mono-code"
+                      className="min-w-5 h-5 px-1 rounded-full flex items-center justify-center font-bold text-[10px] font-mono-code"
                     >
                       {count}
                     </span>
                   </div>
-                  <div className="text-xs font-bold text-slate-800 truncate" title={st.name}>
+                  <div className="text-xs font-bold text-slate-800 line-clamp-2" title={st.name}>
                     {st.name}
                   </div>
                 </div>
@@ -360,18 +549,17 @@ export const AnalyticsView: React.FC<AnalyticsViewProps> = ({
                     {formatBWP(funding)}
                   </div>
                   <div className="w-full bg-slate-200 h-2 rounded-full overflow-hidden">
-                    <div 
-                      style={{ 
-                        width: `${Math.min(100, Math.max(15, (count / (projects.length || 1)) * 100 * 2.5))}%`,
-                        backgroundColor: st.color 
+                    <div
+                      style={{
+                        width: `${count === 0 ? 0 : Math.min(100, Math.max(15, (count / (adminPipelineSummary.totalReceived || 1)) * 100 * 2.5))}%`,
+                        backgroundColor: st.color
                       }}
                       className="h-full rounded-full"
                     />
                   </div>
                 </div>
               </div>
-            );
-          })}
+          ))}
         </div>
       </div>
 

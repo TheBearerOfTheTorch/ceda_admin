@@ -9,6 +9,9 @@ import {
   Check,
   FolderKanban,
   Sparkles,
+  LogOut,
+  Trash2,
+  ArrowLeft,
 } from 'lucide-react';
 import { AdminPersonnel } from '../../types/ceda';
 import { WorkspaceCursorItem } from '../../lib/firebase';
@@ -39,9 +42,14 @@ interface WorkspaceShareModalProps {
   onCreateCustomWorkspace?: () => void;
   onLoadSampleData?: () => void;
   currentUserName: string;
+  currentUserId?: number;
+  currentUserEmail?: string;
   personnel: AdminPersonnel[];
   liveCollaborators?: WorkspaceCursorItem[];
   onInviteSent?: (email: string) => void;
+  onRemoveCollaborator?: (member: { memberId?: number; userId?: number | null; email: string }) => Promise<void> | void;
+  onReturnToOwnWorkspace?: () => void;
+  onCancelCollaboration?: (workspaceId: string) => Promise<void> | void;
 }
 
 export const WorkspaceShareModal: React.FC<WorkspaceShareModalProps> = ({
@@ -53,13 +61,19 @@ export const WorkspaceShareModal: React.FC<WorkspaceShareModalProps> = ({
   onCreateCustomWorkspace,
   onLoadSampleData,
   currentUserName,
+  currentUserId,
+  currentUserEmail,
   personnel,
   liveCollaborators = [],
   onInviteSent,
+  onRemoveCollaborator,
+  onReturnToOwnWorkspace,
+  onCancelCollaboration,
 }) => {
   const [inviteEmail, setInviteEmail] = useState('');
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [submitting, setSubmitting] = useState(false);
+  const [removingKey, setRemovingKey] = useState<string | null>(null);
   const [inviteUrl, setInviteUrl] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
@@ -162,12 +176,20 @@ export const WorkspaceShareModal: React.FC<WorkspaceShareModalProps> = ({
             </div>
             <div className="space-y-1.5">
               {workspacesList.map((ws) => (
-                <button
+                <div
                   key={ws.id}
-                  type="button"
                   onClick={() => {
                     onSwitchWorkspace(ws.id);
                     onClose();
+                  }}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      onSwitchWorkspace(ws.id);
+                      onClose();
+                    }
                   }}
                   className={`w-full px-3 py-2.5 rounded-xl border text-left flex items-center justify-between transition-all cursor-pointer ${
                     ws.id === activeWorkspaceId
@@ -181,14 +203,73 @@ export const WorkspaceShareModal: React.FC<WorkspaceShareModalProps> = ({
                       {ws.isOwner ? 'Owner' : 'Shared Collaborator'} • {ws.id}
                     </div>
                   </div>
-                  {ws.id === activeWorkspaceId && (
-                    <span className="text-[10px] font-extrabold bg-[#006194] text-white px-2 py-0.5 rounded-full">
-                      Active
-                    </span>
-                  )}
-                </button>
+                  <div className="flex items-center gap-1.5">
+                    {!ws.isOwner && onCancelCollaboration && (
+                      <button
+                        type="button"
+                        onClick={async (e) => {
+                          e.stopPropagation();
+                          setRemovingKey(`ws-${ws.id}`);
+                          try {
+                            await onCancelCollaboration(ws.id);
+                            onClose();
+                          } finally {
+                            setRemovingKey(null);
+                          }
+                        }}
+                        disabled={removingKey === `ws-${ws.id}`}
+                        className="px-2 py-0.5 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-[10px] flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                        title="Cancel collaboration and leave this shared workspace"
+                      >
+                        <LogOut className="w-3 h-3" />
+                        <span>Cancel</span>
+                      </button>
+                    )}
+                    {ws.id === activeWorkspaceId && (
+                      <span className="text-[10px] font-extrabold bg-[#006194] text-white px-2 py-0.5 rounded-full">
+                        Active
+                      </span>
+                    )}
+                  </div>
+                </div>
               ))}
             </div>
+
+            {activeWs && !activeWs.isOwner && (
+              <div className="mt-2.5 p-2.5 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-between gap-2 flex-wrap">
+                <span className="text-[11px] font-semibold text-amber-900">
+                  Collaborating in <strong>{activeWs.name}</strong>
+                </span>
+                <div className="flex items-center gap-1.5">
+                  {onReturnToOwnWorkspace && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onReturnToOwnWorkspace();
+                        onClose();
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-white hover:bg-slate-50 text-slate-800 border border-slate-300 font-bold text-[10.5px] flex items-center gap-1 cursor-pointer"
+                    >
+                      <ArrowLeft className="w-3 h-3" />
+                      <span>Back to My Workspace</span>
+                    </button>
+                  )}
+                  {onCancelCollaboration && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        await onCancelCollaboration(activeWs.id);
+                        onClose();
+                      }}
+                      className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-bold text-[10.5px] flex items-center gap-1 cursor-pointer"
+                    >
+                      <LogOut className="w-3 h-3" />
+                      <span>Cancel Collaboration</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Invite Collaborator Form */}
@@ -298,6 +379,36 @@ export const WorkspaceShareModal: React.FC<WorkspaceShareModalProps> = ({
                         >
                           {m.status}
                         </span>
+                        {activeWs?.isOwner &&
+                          m.role !== 'owner' &&
+                          !(currentUserEmail && m.email.toLowerCase() === currentUserEmail.toLowerCase()) &&
+                          !(currentUserId && m.userId && Number(m.userId) === Number(currentUserId)) &&
+                          onRemoveCollaborator && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                const k = `member-${m.id}`;
+                                setRemovingKey(k);
+                                try {
+                                  await onRemoveCollaborator({
+                                    memberId: m.id,
+                                    userId: m.userId,
+                                    email: m.email,
+                                  });
+                                  setMembers((prev) => prev.filter((item) => item.id !== m.id));
+                                  setStatusMessage(`Removed ${m.email} from collaboration.`);
+                                } finally {
+                                  setRemovingKey(null);
+                                }
+                              }}
+                              disabled={removingKey === `member-${m.id}`}
+                              className="px-2 py-0.5 rounded-md bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 font-bold text-[10px] flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                              title={`Remove ${m.email} from this workspace`}
+                            >
+                              <Trash2 className="w-3 h-3" />
+                              <span>Remove</span>
+                            </button>
+                          )}
                       </div>
                     </div>
                   );

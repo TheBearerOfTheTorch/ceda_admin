@@ -92,6 +92,9 @@ export interface ProjectCardData {
   quorumMet?: boolean;
   complianceRows?: { label: string; value: string; isChecked: boolean }[];
   intakeProgressText?: string;
+  customFieldValues?: Record<string, string | number>;
+  submitterId?: number | string;
+  submitterEmail?: string;
   auditLog: {
     timestamp: string;
     action: string;
@@ -217,6 +220,7 @@ export interface AdminAlertNotification {
   id: string;
   targetUserId: number;
   targetUserName: string;
+  targetUserEmail?: string;
   targetUserRole?: string;
   targetRole?: string;
   type: 'sla_warning' | 'inactivity' | 'priority_notice' | 'custom';
@@ -335,7 +339,12 @@ export interface QueueIdeaItem {
   urgency: 'Standard' | 'Priority' | 'Fast-Track';
   capitalAsk: number;
   evaluatorId?: number;
-  status: 'in_queue' | 'evaluating' | 'completed';
+  status: 'in_queue' | 'evaluating' | 'completed' | 'adjudicated';
+  stageId?: StageId;
+  stage?: string;
+  currentStepNumber?: number;
+  currentWorkflowStageName?: string;
+  finalWorkflowCompleted?: boolean;
   progress: number; // 0 to 100%
   slaRemainingDays: number;
   slaTargetDays: number;
@@ -396,4 +405,53 @@ export interface AdminCanvasTool {
   icon: string;
   description: string;
   color: string;
+}
+
+export interface FaqItem {
+  id: string;
+  question: string;
+  answer: string;
+  category: string;
+  updatedAt: string;
+  updatedAtMs?: number;
+  updatedBy?: string;
+}
+
+export type SystemFeedbackCategory =
+  | 'Platform Usability'
+  | 'Workflow Clarity'
+  | 'Review Speed'
+  | 'Support & Communication'
+  | 'General';
+
+export interface SystemFeedbackItem {
+  id: string;
+  submitterId: number | string;
+  submitterName: string;
+  submitterEmail?: string;
+  category: SystemFeedbackCategory;
+  stageContext?: string;
+  rating: number;
+  comment: string;
+  createdAt: string;
+  createdAtMs: number;
+}
+
+export interface AdjudicatorCollaborativeScore {
+  id: string;
+  innovationId: string;
+  innovationCode?: string;
+  innovationTitle?: string;
+  adjudicatorId: number | string;
+  adjudicatorName: string;
+  adjudicatorEmail?: string;
+  strategicFit: number;
+  financialViability: number;
+  commercialization: number;
+  socialImpact: number;
+  totalScore: number;
+  recommendation: 'APPROVE' | 'REVISE' | 'REJECT';
+  comments: string;
+  updatedAt: string;
+  updatedAtMs: number;
 }

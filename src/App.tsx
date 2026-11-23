@@ -5,7 +5,7 @@ import {
   AdminPersonnel, SubmissionBatchQueue, ApplicationFormField, WorkflowCycle,
   QueueIdeaItem, CanvasEvaluatorStation, CanvasPoolContainer, AdminCanvasTool,
   SubmitterEnquiryMessage, AdminAlertNotification, CanvasAnnotationItem,
-  StatutoryScreeningRecord
+  StatutoryScreeningRecord, FaqItem, SystemFeedbackItem, SystemFeedbackCategory
 } from './types/ceda';
 import {
   PIPELINE_STAGES, INITIAL_PROJECTS, INITIAL_CONNECTORS,
@@ -56,6 +56,8 @@ import {
   recordIdeaAuditEvent,
   normalizeIdeaKeyTitle,
   subscribeToLifecycleRecords,
+  resetIdeaLifecycleToIntake,
+  mapWorkflowStagesToPipelineStages,
   STAGE_ORDER,
 } from './lib/stageJourneyStore';
 import {
@@ -79,6 +81,7 @@ import {
   saveIdeaAssignment,
   deleteIdeaAssignment,
   deleteIdeaAssignmentsByInnovationId,
+  deleteAllAssignmentsForUser,
   subscribeToAssignedIdeas,
   subscribeToAllIdeaAssignments,
   publishWorkspaceInviteEvent,
@@ -87,12 +90,25 @@ import {
   publishWorkspaceCursor,
   leaveWorkspaceCursor,
   subscribeToWorkspaceCursors,
+  publishWorkspaceMemberRemoved,
+  subscribeToWorkspaceMemberRemoved,
   publishCitizenEnquiry,
   subscribeToCitizenEnquiries,
   publishAdjudicationQueueItem,
   removeAdjudicationQueueItem,
   subscribeToAdjudicationQueue,
+  publishWorkflowCycles,
+  subscribeToWorkflowCycles,
+  publishApplicationFields,
+  subscribeToApplicationFields,
+  DEFAULT_FAQ_ITEMS,
+  publishFaqItems,
+  subscribeToFaqItems,
+  publishSystemFeedback,
+  subscribeToSystemFeedback,
 } from './lib/firebase.ts';
+import { SubmitterFaqFeedbackModal } from './components/submitter/SubmitterFaqFeedbackModal.tsx';
+import { WorkspaceAiDrawer } from './components/shared/WorkspaceAiDrawer.tsx';
 import {
   initAudioUnlock,
   playNewSubmissionSound,
@@ -268,6 +284,14 @@ function MainAppContent() {
   const [isLiveActivityOpen, setIsLiveActivityOpen] = useState<boolean>(false);
   isLiveActivityOpenRef.current = isLiveActivityOpen;
   const [isAdminPanelOpen, setIsAdminPanelOpen] = useState<boolean>(false);
+  const [adminPanelInitialTab, setAdminPanelInitialTab] = useState<'users' | 'categories' | 'workflow' | 'faqs' | 'feedback'>('users');
+  const [isSubmitterFaqOpen, setIsSubmitterFaqOpen] = useState<boolean>(false);
+  const [submitterFaqInitialTab, setSubmitterFaqInitialTab] = useState<'faq' | 'feedback'>('faq');
+  const [faqItems, setFaqItems] = useState<FaqItem[]>(() => DEFAULT_FAQ_ITEMS);
+  const [systemFeedback, setSystemFeedback] = useState<SystemFeedbackItem[]>([]);
+  const [isAiDrawerOpen, setIsAiDrawerOpen] = useState<boolean>(false);
+  const [aiAllowAutoScreen, setAiAllowAutoScreen] = useState<boolean>(true);
+  const [aiAllowAutoAssign, setAiAllowAutoAssign] = useState<boolean>(true);
 
   // Admin Specific Modals
   const [isBatchAssignOpen, setIsBatchAssignOpen] = useState<boolean>(false);
@@ -445,11 +469,24 @@ function MainAppContent() {
 
   const applyWorkspaceState = (state: PersistedCanvasState) => {
     if (!state || typeof state !== 'object') return;
-    if (Array.isArray(state.projects) && (state.projects.length > 0 || currentUser?.role !== 'Submitter')) {
-      setProjects(state.projects);
+    if (currentUser?.role === 'Submitter') {
+      const myEmailLower = (currentUser.email || '').trim().toLowerCase();
+      const ownProjects = Array.isArray(state.projects)
+        ? state.projects.filter(
+            (p: ProjectCardData) =>
+              (p.submitterId !== undefined && Number(p.submitterId) === Number(currentUser.id)) ||
+              (Boolean(myEmailLower) && Boolean(p.submitterEmail) && p.submitterEmail!.trim().toLowerCase() === myEmailLower)
+          )
+        : [];
+      setProjects(ownProjects);
+      setIntakeDossiers([]);
+    } else {
+      if (Array.isArray(state.projects)) {
+        setProjects(state.projects);
+      }
+      if (Array.isArray(state.intakeDossiers)) setIntakeDossiers(state.intakeDossiers);
     }
     if (Array.isArray(state.connectors)) setConnectors(state.connectors);
-    if (Array.isArray(state.intakeDossiers)) setIntakeDossiers(state.intakeDossiers);
     if (Array.isArray(state.personnel)) setPersonnel(state.personnel);
     if (Array.isArray(state.submissionBatches)) setSubmissionBatches(state.submissionBatches);
     if (Array.isArray(state.applicationFields)) setApplicationFields(state.applicationFields);
@@ -479,7 +516,29 @@ function MainAppContent() {
     }
     if (Array.isArray(state.canvasPools)) setCanvasPools(state.canvasPools);
     if (Array.isArray(state.canvasAnnotations)) setCanvasAnnotations(state.canvasAnnotations);
-    if (Array.isArray(state.enquiryMessages)) setEnquiryMessages(state.enquiryMessages);
+    if (Array.isArray(state.enquiryMessages)) {
+      setEnquiryMessages((prev) => {
+        const merged = new Map<string, SubmitterEnquiryMessage>();
+        for (const msg of [...state.enquiryMessages!, ...prev]) {
+          if (!msg?.id) continue;
+          const existing = merged.get(msg.id);
+          const msgUpdated = Number((msg as any).updatedAtMs || msg.rawTimestamp || 0);
+          const existingUpdated = Number((existing as any)?.updatedAtMs || existing?.rawTimestamp || 0);
+          const msgThreadLen = Array.isArray(msg.thread) ? msg.thread.length : 0;
+          const existingThreadLen = Array.isArray(existing?.thread) ? existing.thread.length : 0;
+          if (
+            !existing ||
+            msgUpdated > existingUpdated ||
+            (msgUpdated === existingUpdated && msgThreadLen >= existingThreadLen)
+          ) {
+            merged.set(msg.id, msg);
+          }
+        }
+        return Array.from(merged.values()).sort(
+          (a, b) => Number(a.rawTimestamp || 0) - Number(b.rawTimestamp || 0)
+        );
+      });
+    }
     if (Array.isArray(state.adminAlerts)) setAdminAlerts(state.adminAlerts);
     if (state.ideaCustomPositions && typeof state.ideaCustomPositions === 'object') setIdeaCustomPositions(state.ideaCustomPositions);
     if (state.poolCustomPositions && typeof state.poolCustomPositions === 'object') setPoolCustomPositions(state.poolCustomPositions);
@@ -533,6 +592,9 @@ function MainAppContent() {
       setEnquiryMessages([]);
       setProjects([]);
       setPersonnel([]);
+      if (currentUser.role === 'Submitter') {
+        setIntakeDossiers([]);
+      }
     }
 
     let cancelled = false;
@@ -772,6 +834,18 @@ function MainAppContent() {
       return;
     }
     const myName = `${currentUser.firstName} ${currentUser.lastName}`.trim() || currentUser.email;
+    const myCursorPayload = {
+      workspaceId: activeWorkspaceId,
+      userId: currentUser.id,
+      email: currentUser.email,
+      userName: myName,
+      role: currentUser.role,
+      color: getCollaboratorColor(currentUser.id, myName),
+      canvasX: 420,
+      canvasY: 260,
+      isFocused: true,
+    };
+
     const unsubCursors = subscribeToWorkspaceCursors(activeWorkspaceId, (items) => {
       const others = items.filter((item) => {
         const sameId = item.userId && String(item.userId) === String(currentUser.id);
@@ -787,25 +861,24 @@ function MainAppContent() {
     const handleLeaveCursor = () => {
       leaveWorkspaceCursor(activeWorkspaceId, currentUser.id);
     };
-    window.addEventListener('blur', handleLeaveCursor);
+    const handleFocusRefresh = () => {
+      publishWorkspaceCursor(myCursorPayload);
+    };
+    window.addEventListener('focus', handleFocusRefresh);
     window.addEventListener('beforeunload', handleLeaveCursor);
+    window.addEventListener('pagehide', handleLeaveCursor);
 
-    // Publish initial viewport presence on workspace join
-    publishWorkspaceCursor({
-      workspaceId: activeWorkspaceId,
-      userId: currentUser.id,
-      email: currentUser.email,
-      userName: myName,
-      role: currentUser.role,
-      color: getCollaboratorColor(currentUser.id, myName),
-      canvasX: 420,
-      canvasY: 260,
-      isFocused: true,
-    });
+    // Publish initial viewport presence & periodic heartbeat while workspace is open
+    publishWorkspaceCursor(myCursorPayload);
+    const heartbeat = window.setInterval(() => {
+      publishWorkspaceCursor(myCursorPayload);
+    }, 18_000);
 
     return () => {
-      window.removeEventListener('blur', handleLeaveCursor);
+      window.clearInterval(heartbeat);
+      window.removeEventListener('focus', handleFocusRefresh);
       window.removeEventListener('beforeunload', handleLeaveCursor);
+      window.removeEventListener('pagehide', handleLeaveCursor);
       leaveWorkspaceCursor(activeWorkspaceId, currentUser.id);
       unsubCursors();
     };
@@ -826,6 +899,179 @@ function MainAppContent() {
       isFocused: true,
     });
   };
+
+  const findOrLoadOwnWorkspaceId = async (): Promise<string> => {
+    if (!currentUser) return '';
+    const owned = workspacesListRef.current.find(
+      (w) => w.isOwner || String(w.ownerId) === String(currentUser.id)
+    );
+    if (owned?.id) return owned.id;
+    try {
+      const res = await fetch(
+        `/api/workspaces/mine?userId=${encodeURIComponent(String(currentUser.id))}&email=${encodeURIComponent(currentUser.email)}`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const list: WorkspaceSummary[] = Array.isArray(data) ? data : (data.workspaces || []);
+        setWorkspacesList(list);
+        workspacesListRef.current = list;
+        const ownFetched = list.find((w) => w.isOwner || String(w.ownerId) === String(currentUser.id));
+        if (ownFetched?.id) return ownFetched.id;
+      }
+    } catch {
+      // ignore
+    }
+    return '';
+  };
+
+  const handleReturnToOwnWorkspace = async () => {
+    if (!currentUser) return;
+    const ownId = await findOrLoadOwnWorkspaceId();
+    if (!ownId || ownId === activeWorkspaceId) return;
+    if (activeWorkspaceId) {
+      await leaveWorkspaceCursor(activeWorkspaceId, currentUser.id);
+    }
+    localStorage.setItem(`ceda_active_workspace_${currentUser.id}`, ownId);
+    setActiveWorkspaceId(ownId);
+    const ownMeta = workspacesListRef.current.find((w) => w.id === ownId);
+    showToast(`Returned to your workspace: ${ownMeta?.name || 'My Workspace'}`);
+  };
+
+  const handleCancelWorkspaceCollaboration = async (targetWorkspaceId?: string) => {
+    if (!currentUser) return;
+    const wsId = targetWorkspaceId || activeWorkspaceId;
+    if (!wsId) return;
+    const wsMeta = workspacesListRef.current.find((w) => w.id === wsId);
+    if (wsMeta?.isOwner) {
+      showToast('You are the owner of this workspace.');
+      return;
+    }
+    const actorName = `${currentUser.firstName} ${currentUser.lastName}`.trim() || currentUser.email;
+    try {
+      await fetch(`/api/workspaces/${encodeURIComponent(wsId)}/members`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          userId: currentUser.id,
+          email: currentUser.email,
+          requesterId: currentUser.id,
+          requesterEmail: currentUser.email,
+        }),
+      });
+    } catch {
+      // ignore
+    }
+    await leaveWorkspaceCursor(wsId, currentUser.id);
+    publishWorkspaceMemberRemoved({
+      workspaceId: wsId,
+      workspaceName: wsMeta?.name || 'Shared Workspace',
+      removedUserId: currentUser.id,
+      removedEmail: currentUser.email,
+      removedByName: actorName,
+      action: 'cancelled',
+    }).catch(() => {});
+
+    setWorkspacesList((prev) => prev.filter((w) => w.id !== wsId));
+    workspacesListRef.current = workspacesListRef.current.filter((w) => w.id !== wsId);
+
+    if (wsId === activeWorkspaceId) {
+      const ownId = await findOrLoadOwnWorkspaceId();
+      if (ownId) {
+        localStorage.setItem(`ceda_active_workspace_${currentUser.id}`, ownId);
+        setActiveWorkspaceId(ownId);
+      }
+    }
+    showToast(`Cancelled collaboration on "${wsMeta?.name || wsId}"`);
+  };
+
+  const handleRemoveWorkspaceCollaborator = async (target: {
+    memberId?: number;
+    userId?: string | number | null;
+    email?: string;
+    userName?: string;
+  }) => {
+    if (!currentUser || !activeWorkspaceId) return;
+    const wsMeta = workspacesListRef.current.find((w) => w.id === activeWorkspaceId);
+    const actorName = `${currentUser.firstName} ${currentUser.lastName}`.trim() || currentUser.email;
+    const matchingCursor = activeWorkspaceCursors.find(
+      (c) =>
+        (target.userId && String(c.userId) === String(target.userId)) ||
+        (target.email && c.email && c.email.toLowerCase() === target.email.toLowerCase())
+    );
+    const resolvedUserId = target.userId || matchingCursor?.userId || null;
+    const resolvedEmail = target.email || matchingCursor?.email || '';
+
+    try {
+      await fetch(`/api/workspaces/${encodeURIComponent(activeWorkspaceId)}/members`, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          memberId: target.memberId,
+          userId: resolvedUserId ? Number(resolvedUserId) : undefined,
+          email: resolvedEmail || undefined,
+          requesterId: currentUser.id,
+          requesterEmail: currentUser.email,
+        }),
+      });
+    } catch {
+      // ignore
+    }
+
+    if (resolvedUserId) {
+      await leaveWorkspaceCursor(activeWorkspaceId, resolvedUserId);
+    }
+    setActiveWorkspaceCursors((prev) =>
+      prev.filter((c) => {
+        const sameId = resolvedUserId && String(c.userId) === String(resolvedUserId);
+        const sameEmail = resolvedEmail && c.email && c.email.toLowerCase() === resolvedEmail.toLowerCase();
+        return !sameId && !sameEmail;
+      })
+    );
+
+    publishWorkspaceMemberRemoved({
+      workspaceId: activeWorkspaceId,
+      workspaceName: wsMeta?.name || 'Workspace',
+      removedUserId: resolvedUserId,
+      removedEmail: resolvedEmail,
+      removedByName: actorName,
+      action: 'removed',
+    }).catch(() => {});
+
+    showToast(`Removed ${target.userName || resolvedEmail || 'collaborator'} from collaboration`);
+  };
+
+  useEffect(() => {
+    if (!currentUser || currentUser.role === 'Submitter') return;
+    const unsubRemoved = subscribeToWorkspaceMemberRemoved(async (ev) => {
+      const myEmailLower = (currentUser.email || '').trim().toLowerCase();
+      const targetEmailLower = (ev.removedEmail || '').trim().toLowerCase();
+      const matchesMe =
+        (ev.removedUserId !== undefined &&
+          ev.removedUserId !== null &&
+          String(ev.removedUserId) === String(currentUser.id)) ||
+        Boolean(targetEmailLower && targetEmailLower === myEmailLower);
+
+      if (ev.action === 'removed' && matchesMe) {
+        setWorkspacesList((prev) => prev.filter((w) => w.id !== ev.workspaceId));
+        workspacesListRef.current = workspacesListRef.current.filter((w) => w.id !== ev.workspaceId);
+        if (activeWorkspaceIdRef.current === ev.workspaceId) {
+          await leaveWorkspaceCursor(ev.workspaceId, currentUser.id);
+          const ownId = await findOrLoadOwnWorkspaceId();
+          if (ownId) {
+            localStorage.setItem(`ceda_active_workspace_${currentUser.id}`, ownId);
+            setActiveWorkspaceId(ownId);
+          }
+          showToast(`${ev.removedByName} removed you from collaboration on "${ev.workspaceName}"`);
+        }
+      } else if (ev.action === 'cancelled' && activeWorkspaceIdRef.current === ev.workspaceId && ev.removedUserId) {
+        setActiveWorkspaceCursors((prev) =>
+          prev.filter((c) => String(c.userId) !== String(ev.removedUserId))
+        );
+        showToast(`${ev.removedByName} left collaboration on "${ev.workspaceName}"`);
+      }
+    });
+    return () => unsubRemoved();
+  }, [currentUser?.id, currentUser?.email, currentUser?.role]);
 
   // 1d. Submitter-scoped Assigned Officials Lookup
   useEffect(() => {
@@ -949,10 +1195,41 @@ function MainAppContent() {
     return () => unsubAdj();
   }, [currentUser?.id, currentUser?.role]);
 
+  // 1i. Real-Time Global Workflow Cycles, Application Form Fields, FAQs & System Feedback Sync
+  useEffect(() => {
+    if (!currentUser) return;
+    const unsubWf = subscribeToWorkflowCycles((remoteCycles) => {
+      if (Array.isArray(remoteCycles) && remoteCycles.length > 0) {
+        setWorkflowCycles(remoteCycles as WorkflowCycle[]);
+      }
+    });
+    const unsubFields = subscribeToApplicationFields((remoteFields) => {
+      if (Array.isArray(remoteFields) && remoteFields.length > 0) {
+        setApplicationFields(remoteFields as ApplicationFormField[]);
+      }
+    });
+    const unsubFaqs = subscribeToFaqItems((items) => {
+      setFaqItems(items as FaqItem[]);
+    });
+    const unsubFeedback = subscribeToSystemFeedback((items) => {
+      setSystemFeedback(items as SystemFeedbackItem[]);
+    });
+    return () => {
+      unsubWf();
+      unsubFields();
+      unsubFaqs();
+      unsubFeedback();
+    };
+  }, [currentUser?.id]);
+
   const currentUserRoleRef = useRef(currentUser?.role);
+  const currentUserIdRef = useRef(currentUser?.id);
+  const currentUserEmailRef = useRef(currentUser?.email);
   useEffect(() => {
     currentUserRoleRef.current = currentUser?.role;
-  }, [currentUser?.role]);
+    currentUserIdRef.current = currentUser?.id;
+    currentUserEmailRef.current = currentUser?.email;
+  }, [currentUser?.role, currentUser?.id, currentUser?.email]);
 
   useEffect(() => {
     initAudioUnlock();
@@ -964,6 +1241,9 @@ function MainAppContent() {
   const dbPollInitializedRef = useRef(false);
   const seenEvaluatorAssignmentIdsRef = useRef<Set<string>>(new Set());
   const evaluatorAssignmentsSeededRef = useRef(false);
+  const seenAdminAlertIdsRef = useRef<Set<string>>(new Set());
+  const adminAlertsSeededRef = useRef(false);
+  const emittedSlaAlertKeysRef = useRef<Set<string>>(new Set());
   const lastAssignmentChimeAtRef = useRef<number>(0);
 
   const triggerEvaluatorAssignmentChime = () => {
@@ -1011,6 +1291,29 @@ function MainAppContent() {
 
         const queueItem = toQueueIdeaFromIncoming(idea);
 
+        // Ensure brand-new incoming Stage 1 submissions start at Stage 1 ('intake')
+        if ((!alreadySeen && isBrandNewAfterLoad) || idea.stageId === 'intake') {
+          const existingLc = getLifecycleRecordForIdea({
+            id: queueItem.id,
+            code: queueItem.code,
+            title: queueItem.title,
+          });
+          if (!existingLc || (!alreadySeen && isBrandNewAfterLoad)) {
+            resetIdeaLifecycleToIntake({
+              id: queueItem.id,
+              code: queueItem.code,
+              title: queueItem.title,
+              enterpriseName: queueItem.enterpriseName,
+              submitterName: queueItem.submitterName,
+              omangId: queueItem.omangId,
+              cipaUin: queueItem.cipaUin,
+              bursTin: queueItem.bursTin,
+              capitalAsk: queueItem.capitalAsk,
+              sector: queueItem.category,
+            });
+          }
+        }
+
         // Buffer real-time submissions so workspace hydration never overwrites them
         const existingIdx = liveSubmissionsBufferRef.current.findIndex(
           (i) =>
@@ -1026,6 +1329,17 @@ function MainAppContent() {
         setQueueIdeas((prev) => mergeIncomingIdeasIntoQueue(prev, [queueItem]));
 
         setProjects((prev) => {
+          if (currentUserRoleRef.current === 'Submitter') {
+            const myId = currentUserIdRef.current;
+            const myEmailLower = (currentUserEmailRef.current || '').trim().toLowerCase();
+            const ideaEmailLower = (idea.submitterEmail || '').trim().toLowerCase();
+            const belongsToMe =
+              (idea.submitterId !== undefined && myId !== undefined && Number(idea.submitterId) === Number(myId)) ||
+              (Boolean(myEmailLower) && Boolean(ideaEmailLower) && ideaEmailLower === myEmailLower);
+            if (!belongsToMe) {
+              return prev;
+            }
+          }
           if (
             prev.some(
               (p) =>
@@ -1059,12 +1373,12 @@ function MainAppContent() {
       const isViewingSharedWorkspace = Boolean(activeWsMeta && activeWsMeta.isOwner === false);
 
       // Filter out ideas promoted to Adjudication Queue ONLY for Evaluators;
-      // Adjudicators must keep seeing their assigned adjudication items until Pilot sanctioning.
+      // Adjudicators must keep seeing their assigned items across Stage 5 and subsequent stages until archived.
       const isAdjUser = currentUser.role === 'Adjudicator';
       const filteredAssignments = (assignments || []).filter((a) => {
         const key = String(a.innovationId || a.idea?.id || '');
         if (isAdjUser) {
-          return a.idea?.status !== 'adjudicated' && a.idea?.stageId !== 'pilot_phase';
+          return (a.idea?.status as string) !== 'archived_complete';
         }
         return !syncedAdjudicationIdsRef.current.has(key);
       });
@@ -1113,12 +1427,12 @@ function MainAppContent() {
         .map((idea) => ({
           ...idea,
           urgency: idea.urgency || 'normal',
-          progress: idea.progress ?? 20,
-          slaRemainingDays: idea.slaRemainingDays ?? 3.5,
+          progress: idea.progress ?? (isAdjUser ? 60 : 20),
+          slaRemainingDays: idea.slaRemainingDays ?? 4.0,
           slaTargetDays: idea.slaTargetDays ?? 5.0,
           arrivalDate: idea.arrivalDate || 'Today',
           rawTimestamp: idea.rawTimestamp || Date.now(),
-          status: 'in_queue' as const,
+          status: (isAdjUser && idea.status ? idea.status : 'in_queue') as QueueIdeaItem['status'],
         }));
 
       const assignedInnovationIds = new Set(filteredAssignments.map((a) => a.innovationId));
@@ -1131,7 +1445,7 @@ function MainAppContent() {
               ...a.idea,
               id: a.innovationId,
               evaluatorId: currentUser.id,
-              status: 'evaluating',
+              status: isAdjUser && a.idea.status === 'adjudicated' ? 'adjudicated' : 'evaluating',
             };
           }
         });
@@ -1381,8 +1695,15 @@ function MainAppContent() {
   // Track Submitter's Own Idea Identifiers (strict log/alert scoping on Submitter side)
   const [submitterDbIdeas, setSubmitterDbIdeas] = useState<{ id: string; code?: string; title: string }[]>([]);
   useEffect(() => {
-    if (!currentUser || currentUser.role !== 'Submitter') return;
-    fetch('/api/innovations')
+    if (!currentUser || currentUser.role !== 'Submitter') {
+      setSubmitterDbIdeas([]);
+      return;
+    }
+    const params = new URLSearchParams({
+      submitterId: String(currentUser.id),
+      submitterEmail: currentUser.email || '',
+    });
+    fetch(`/api/innovations?${params.toString()}`)
       .then((res) => (res.ok ? res.json() : []))
       .then((data) => {
         if (Array.isArray(data)) {
@@ -1396,7 +1717,21 @@ function MainAppContent() {
         }
       })
       .catch(() => { });
-  }, [currentUser?.role, currentUser?.id, projects.length]);
+  }, [currentUser?.role, currentUser?.id, currentUser?.email, projects.length]);
+
+  const submitterScopedProjects = useMemo(() => {
+    if (!currentUser || currentUser.role !== 'Submitter') return projects;
+    const myEmailLower = (currentUser.email || '').trim().toLowerCase();
+    return projects.filter((p) => {
+      const matchesId =
+        p.submitterId !== undefined && Number(p.submitterId) === Number(currentUser.id);
+      const matchesEmail =
+        Boolean(myEmailLower) &&
+        Boolean(p.submitterEmail) &&
+        String(p.submitterEmail).trim().toLowerCase() === myEmailLower;
+      return matchesId || matchesEmail;
+    });
+  }, [projects, currentUser?.role, currentUser?.id, currentUser?.email]);
 
   const submitterOwnedIdeaIdentifiers = useMemo(() => {
     const ids = new Set<string>();
@@ -1406,13 +1741,13 @@ function MainAppContent() {
       if (item.code) ids.add(item.code);
       if (item.title) titles.add(item.title);
     });
-    projects.forEach((p) => {
+    submitterScopedProjects.forEach((p) => {
       if (p.id) ids.add(String(p.id));
       if (p.stageTag) ids.add(String(p.stageTag));
       if (p.title) titles.add(p.title);
     });
     return { ids: Array.from(ids), titles: Array.from(titles) };
-  }, [submitterDbIdeas, projects]);
+  }, [submitterDbIdeas, submitterScopedProjects]);
 
   // Extract ONLY Evaluators & Adjudicators who are assigned to this Submitter's owned ideas
   const assignedOfficialsForSubmitter = useMemo(() => {
@@ -2367,6 +2702,7 @@ function MainAppContent() {
     const newAlert: AdminAlertNotification = {
       id: `alert-${Date.now()}`,
       targetUserId,
+      targetUserEmail: targetOfficial?.email,
       targetUserName: targetOfficial?.name || 'Assigned Official',
       targetUserRole: targetOfficial?.role || 'Evaluator',
       targetRole: targetOfficial?.role || 'Evaluator',
@@ -2384,6 +2720,7 @@ function MainAppContent() {
     publishAdminAlert({
       id: newAlert.id,
       targetUserId,
+      targetUserEmail: targetOfficial?.email,
       targetUserName: newAlert.targetUserName,
       targetUserRole: newAlert.targetUserRole || 'Evaluator',
       type,
@@ -2393,10 +2730,11 @@ function MainAppContent() {
     });
     publishNotification({
       innovationId: relatedIdeaCode || 'CEDA-ALERT',
-      type: 'Idea assigned',
+      type: type === 'sla_warning' ? 'SLA Violation' : 'Idea assigned',
       message: `${title}: ${message}`,
       user: currentUser ? `${currentUser.firstName} ${currentUser.lastName}` : 'Administrator',
       targetRole: newAlert.targetUserRole,
+      targetEmail: targetOfficial?.email,
     });
 
     setPersonnel((prev) =>
@@ -2418,9 +2756,17 @@ function MainAppContent() {
   // Fetch PostgreSQL innovations on mount
   const refreshFromBackend = async () => {
     try {
-      const res = await fetch('/api/innovations');
+      const apiUrl =
+        currentUser?.role === 'Submitter'
+          ? `/api/innovations?submitterId=${encodeURIComponent(String(currentUser.id))}&submitterEmail=${encodeURIComponent(currentUser.email || '')}`
+          : '/api/innovations';
+      const res = await fetch(apiUrl);
       if (res.ok) {
         const backendInnovations = await res.json();
+        if (currentUser?.role === 'Submitter' && (!backendInnovations || backendInnovations.length === 0)) {
+          setProjects([]);
+          return;
+        }
         if (backendInnovations && backendInnovations.length > 0) {
           const mapped: ProjectCardData[] = backendInnovations.map((item: any) => {
             const baseStageId = (
@@ -2506,6 +2852,8 @@ function MainAppContent() {
                 },
               ],
               tags: [item.category?.categoryName || 'General', item.status],
+              submitterId: item.submitterId,
+              submitterEmail: item.submitter?.email,
               auditLog:
                 item.history?.map((h: any) => ({
                   timestamp: new Date(h.timestamp).toLocaleTimeString([], {
@@ -2754,14 +3102,15 @@ function MainAppContent() {
     return () => unsubLifecycle();
   }, []);
 
-  // Stage advancement
+  // Stage advancement (Dynamic Workflow Cycle aware)
   const handleAdvanceProject = async (projectId: string) => {
     const proj = projects.find((p) => p.id === projectId);
     if (!proj) return;
 
-    const currentIndex = PIPELINE_STAGES.findIndex((s) => s.id === proj.stageId);
-    if (currentIndex < PIPELINE_STAGES.length - 1) {
-      const nextStage = PIPELINE_STAGES[currentIndex + 1];
+    const pipelineStages = mapWorkflowStagesToPipelineStages(activeWorkflowCycle);
+    const currentIndex = pipelineStages.findIndex((s) => s.id === proj.stageId);
+    if (currentIndex >= 0 && currentIndex < pipelineStages.length - 1) {
+      const nextStage = pipelineStages[currentIndex + 1];
       const actorName = `${currentUser?.firstName || ''} ${currentUser?.lastName || ''}`.trim() || 'Evaluator';
 
       recordStageTransitionLifecycle(
@@ -2820,7 +3169,7 @@ function MainAppContent() {
         innovationId: proj.id,
         code: proj.stageTag,
         title: proj.title,
-        previousStage: PIPELINE_STAGES[currentIndex]?.name,
+        previousStage: pipelineStages[currentIndex]?.name,
         newStage: nextStage.name,
         outcome: 'passed',
         actorName,
@@ -2832,7 +3181,8 @@ function MainAppContent() {
   };
 
   const handleMoveProjectStage = async (projectId: string, newStageId: StageId) => {
-    const stage = PIPELINE_STAGES.find((s) => s.id === newStageId);
+    const pipelineStages = mapWorkflowStagesToPipelineStages(activeWorkflowCycle);
+    const stage = pipelineStages.find((s) => s.id === newStageId);
     const proj = projects.find((p) => p.id === projectId);
     if (!stage) return;
 
@@ -2885,7 +3235,7 @@ function MainAppContent() {
     });
   };
 
-  const handleAdvanceIdeaStage = async (ideaId: string) => {
+  const handleAdvanceIdeaStage = async (ideaId: string, explicitTargetStep?: number) => {
     const assignedIdea =
       assignedIdeasMap[ideaId] ||
       queueIdeas.find((i) => i.id === ideaId) ||
@@ -2905,7 +3255,95 @@ function MainAppContent() {
     const isAdjudicatorAction = currentUser?.role === 'Adjudicator';
 
     if (isAdjudicatorAction) {
-      // Adjudicator approves Stage 5 Board Adjudication -> advances proposal to Stage 6 Sandbox & Pilot Phase
+      const sortedStages = [...(activeWorkflowCycle?.stages || [])].sort(
+        (a, b) => a.stepNumber - b.stepNumber
+      );
+      const adjStartStage =
+        sortedStages.find((s) => s.stepNumber === 5 && s.assignedRole === 'Adjudicator') ||
+        sortedStages.find((s) => s.assignedRole === 'Adjudicator') ||
+        sortedStages.find((s) => s.stepNumber === 5) || {
+          id: 'stg-5',
+          name: 'Adjudication Board Chamber',
+          stepNumber: 5,
+          assignedRole: 'Adjudicator' as const,
+          thresholdCriteria: 'Quorum Vote (>= 3/4)',
+          targetTurnaroundDays: 4,
+          color: '#16a34a',
+        };
+      const maxWorkflowStep =
+        sortedStages[sortedStages.length - 1]?.stepNumber ?? adjStartStage.stepNumber;
+
+      // Explicit archive & clear once all post-adjudication stages are finished
+      if (explicitTargetStep === -1) {
+        setAssignedIdeasMap((prev) => {
+          const next = { ...prev };
+          delete next[ideaId];
+          return next;
+        });
+        setQueueIdeas((prev) =>
+          prev.filter(
+            (item) =>
+              String(item.id) !== String(ideaId) &&
+              (!ideaTitle || normalizeIdeaKeyTitle(item.title) !== normalizeIdeaKeyTitle(ideaTitle))
+          )
+        );
+        syncedAdjudicationIdsRef.current.delete(String(ideaId));
+        setSyncedAdjudicationIdeas((prev) =>
+          prev.filter((item) => String(item.id) !== String(ideaId))
+        );
+        removeAdjudicationQueueItem(ideaId).catch(() => {});
+        setCanvasStations((prev) =>
+          prev.map((st) => ({
+            ...st,
+            assignedIdeaIds: (st.assignedIdeaIds || []).filter((id) => String(id) !== String(ideaId)),
+          }))
+        );
+        setIdeaCustomPositions((prev) => {
+          const next = { ...prev };
+          Object.keys(next).forEach((k) => {
+            if (k === ideaId || k.startsWith(`eval__${ideaId}`)) {
+              delete next[k];
+            }
+          });
+          return next;
+        });
+        if (currentUser?.id) {
+          deleteIdeaAssignment(currentUser.id, ideaId).catch(() => {});
+        }
+        deleteIdeaAssignmentsByInnovationId(ideaId).catch(() => {});
+        showToast(`🗄️ "${ideaTitle}" archived & cleared from your Adjudication Queue!`);
+        return;
+      }
+
+      const mapStageDefToStageId = (stepNum: number, stageName?: string): StageId => {
+        const lower = (stageName || '').toLowerCase();
+        if (lower.includes('adjudication') || lower.includes('board') || stepNum <= 5) return 'approval_board';
+        if (lower.includes('pilot') || lower.includes('sandbox') || stepNum === 6) return 'pilot_phase';
+        if (lower.includes('disbursement') || lower.includes('implementation') || stepNum === 7) return 'implementation';
+        return 'realized_impact';
+      };
+
+      const currentStep = Math.max(
+        adjStartStage.stepNumber,
+        Number(assignedIdea?.currentStepNumber || adjStartStage.stepNumber)
+      );
+      const nextStep = explicitTargetStep ?? currentStep + 1;
+      const completedStage =
+        sortedStages.find((s) => s.stepNumber === nextStep - 1) ||
+        sortedStages.find((s) => s.stepNumber === currentStep) ||
+        adjStartStage;
+      const nextStage = sortedStages.find((s) => s.stepNumber === nextStep) || null;
+      const isFinalCompleted = nextStep > maxWorkflowStep || !nextStage;
+
+      const targetStageObj = nextStage || completedStage;
+      const mappedStageId = mapStageDefToStageId(
+        targetStageObj.stepNumber,
+        targetStageObj.name
+      );
+      const newProgress = isFinalCompleted
+        ? 100
+        : Math.min(98, Math.round((completedStage.stepNumber / maxWorkflowStep) * 100));
+
       recordStageTransitionLifecycle(
         {
           id: proj?.id || ideaId,
@@ -2916,12 +3354,34 @@ function MainAppContent() {
           cipaUin: assignedIdea?.cipaUin || proj?.cipaNumber,
           bursTin: assignedIdea?.bursTin || proj?.bursTin,
         },
-        'pilot_phase',
+        mappedStageId,
         actorName,
         'Adjudicator',
         {
           status: 'passed',
-          notes: `Adjudicator ${actorName} sanctioned Board Adjudication approval for "${ideaTitle}" and moved it to Stage 6: Sandbox & Pilot Phase.`,
+          notes: isFinalCompleted
+            ? `${actorName} completed final Stage ${completedStage.stepNumber} (${completedStage.name}) for "${ideaTitle}".`
+            : `${actorName} completed Stage ${completedStage.stepNumber} (${completedStage.name}) and advanced "${ideaTitle}" to Stage ${nextStage.stepNumber} (${nextStage.name}).`,
+        }
+      );
+
+      recordIdeaAuditEvent(
+        {
+          id: proj?.id || ideaId,
+          code: ideaCode,
+          title: ideaTitle,
+          enterpriseName: assignedIdea?.enterpriseName || proj?.applicant?.organization,
+          submitterName,
+        },
+        {
+          action: isFinalCompleted
+            ? `Completed Stage ${completedStage.stepNumber}: ${completedStage.name}`
+            : `Stage ${completedStage.stepNumber} (${completedStage.name}) → Stage ${nextStage.stepNumber} (${nextStage.name})`,
+          author: `${actorName} (Adjudicator)`,
+          authorRole: 'Adjudicator',
+          tabName: targetStageObj.name,
+          eventType: 'stage_transition',
+          notes: `Threshold verified: ${completedStage.thresholdCriteria}.`,
         }
       );
 
@@ -2933,7 +3393,8 @@ function MainAppContent() {
           ) {
             return {
               ...p,
-              stageId: 'pilot_phase',
+              stageId: mappedStageId,
+              stageProgress: newProgress,
               lastUpdated: 'Just now',
             };
           }
@@ -2941,47 +3402,72 @@ function MainAppContent() {
         })
       );
 
-      setAssignedIdeasMap((prev) => {
-        const next = { ...prev };
-        delete next[ideaId];
-        return next;
+      const baseIdeaObj: QueueIdeaItem = assignedIdea || {
+        id: ideaId,
+        code: ideaCode,
+        title: ideaTitle,
+        category: proj?.sector || 'General',
+        arrivalDate: proj?.submittedDate || 'Today',
+        urgency: 'Standard',
+        capitalAsk: proj?.fundingRequested || 0,
+        status: 'adjudicated',
+        progress: newProgress,
+        slaRemainingDays: targetStageObj.targetTurnaroundDays,
+        slaTargetDays: targetStageObj.targetTurnaroundDays,
+        enterpriseName: proj?.applicant?.organization,
+        submitterName,
+      };
+
+      const updatedIdeaObj: QueueIdeaItem = {
+        ...baseIdeaObj,
+        status: 'adjudicated',
+        stageId: mappedStageId,
+        stage: mappedStageId,
+        currentStepNumber: nextStep,
+        currentWorkflowStageName: isFinalCompleted
+          ? `${completedStage.name} (Completed)`
+          : nextStage.name,
+        finalWorkflowCompleted: isFinalCompleted,
+        progress: newProgress,
+        slaRemainingDays: targetStageObj.targetTurnaroundDays,
+        slaTargetDays: targetStageObj.targetTurnaroundDays,
+      };
+
+      setAssignedIdeasMap((prev) => ({
+        ...prev,
+        [ideaId]: {
+          ...updatedIdeaObj,
+          evaluatorId: currentUser?.id,
+        },
+      }));
+
+      setQueueIdeas((prev) => {
+        const exists = prev.some((i) => String(i.id) === String(ideaId));
+        if (!exists) return prev;
+        return prev.map((item) =>
+          String(item.id) === String(ideaId) ? updatedIdeaObj : item
+        );
       });
 
-      setQueueIdeas((prev) =>
-        prev.filter(
-          (item) =>
-            String(item.id) !== String(ideaId) &&
-            (!ideaTitle || normalizeIdeaKeyTitle(item.title) !== normalizeIdeaKeyTitle(ideaTitle))
-        )
-      );
-
+      // Remove from unassigned Adjudication Queue once Stage 5 passes
       syncedAdjudicationIdsRef.current.delete(String(ideaId));
       setSyncedAdjudicationIdeas((prev) =>
         prev.filter((item) => String(item.id) !== String(ideaId))
       );
       removeAdjudicationQueueItem(ideaId).catch(() => {});
 
-      setCanvasStations((prev) =>
-        prev.map((st) => ({
-          ...st,
-          assignedIdeaIds: (st.assignedIdeaIds || []).filter((id) => String(id) !== String(ideaId)),
-        }))
-      );
-
-      setIdeaCustomPositions((prev) => {
-        const next = { ...prev };
-        Object.keys(next).forEach((k) => {
-          if (k === ideaId || k.startsWith(`eval__${ideaId}`)) {
-            delete next[k];
-          }
-        });
-        return next;
-      });
-
       if (currentUser?.id) {
-        deleteIdeaAssignment(currentUser.id, ideaId).catch(() => {});
+        saveIdeaAssignment({
+          innovationId: ideaId,
+          ideaTitle,
+          evaluatorId: currentUser.id,
+          evaluatorEmail: currentUser.email,
+          evaluatorName: actorName,
+          assignedAt: new Date().toISOString(),
+          status: isFinalCompleted ? 'final_completed' : `stage_${nextStep}`,
+          idea: updatedIdeaObj,
+        }).catch(() => {});
       }
-      deleteIdeaAssignmentsByInnovationId(ideaId).catch(() => {});
 
       fetch('/api/innovations/sync-stage', {
         method: 'POST',
@@ -2990,10 +3476,12 @@ function MainAppContent() {
           id: proj?.id || ideaId,
           code: ideaCode,
           title: ideaTitle,
-          stage: 'pilot_phase',
+          stage: mappedStageId,
           status: 'approved',
           userId: currentUser?.id,
-          actionNote: `Sanctioned by Adjudicator (${actorName}) and moved to Pilot Phase.`,
+          actionNote: isFinalCompleted
+            ? `Completed Stage ${completedStage.stepNumber}: ${completedStage.name}`
+            : `Stage ${completedStage.stepNumber} (${completedStage.name}) cleared → Stage ${nextStage.stepNumber} (${nextStage.name}).`,
         }),
       }).catch(() => {});
 
@@ -3001,23 +3489,33 @@ function MainAppContent() {
         innovationId: proj?.id || ideaId,
         code: ideaCode,
         title: ideaTitle,
-        previousStage: 'Board Adjudication',
-        newStage: 'Sandbox & Pilot Phase',
+        previousStage: `${completedStage.stepNumber}. ${completedStage.name}`,
+        newStage: isFinalCompleted
+          ? `${completedStage.stepNumber}. ${completedStage.name} (Completed)`
+          : `${nextStage.stepNumber}. ${nextStage.name}`,
         outcome: 'passed',
         actorName,
         actorRole: 'Adjudicator',
-        notes: `Your innovation proposal "${ideaTitle}" has received Board Adjudication sanction and advanced to Stage 6: Sandbox & Pilot Phase.`,
+        notes: isFinalCompleted
+          ? `Your proposal "${ideaTitle}" has completed all stages through ${completedStage.stepNumber}. ${completedStage.name}.`
+          : `Your proposal "${ideaTitle}" cleared Stage ${completedStage.stepNumber} (${completedStage.name}) and advanced to Stage ${nextStage.stepNumber} (${nextStage.name}).`,
         submitterName,
       });
 
-      showToast(`🏛️ "${ideaTitle}" sanctioned for Pilot Phase & cleared from your Adjudication Queue!`);
+      showToast(
+        isFinalCompleted
+          ? `🎉 "${ideaTitle}" completed all workflow stages through Stage ${completedStage.stepNumber}!`
+          : `✅ Stage ${completedStage.stepNumber} (${completedStage.name}) cleared → Stage ${nextStage.stepNumber} (${nextStage.name}) active!`
+      );
 
       publishNotification({
         innovationId: ideaId,
         type: 'Pilot approved',
-        message: `Board Decision: Proposal "${ideaTitle}" was sanctioned by ${actorName} and moved to Pilot Phase.`,
+        message: isFinalCompleted
+          ? `Stage ${completedStage.stepNumber} (${completedStage.name}) completed for "${ideaTitle}".`
+          : `Stage ${completedStage.stepNumber} (${completedStage.name}) cleared → Stage ${nextStage.stepNumber} (${nextStage.name}) for "${ideaTitle}".`,
         user: actorName,
-        targetRole: 'Administrator',
+        targetRole: nextStage?.assignedRole || 'Administrator',
       }).catch(console.warn);
 
       publishActivity({
@@ -3182,9 +3680,10 @@ function MainAppContent() {
 
   // Convert intake dossier from left sidebar to Stage 1 card (for Non-Admins)
   const handleAdvanceDossierToStage1 = (dossier: IntakeDossier) => {
+    const uniqueSuffix = `${Date.now().toString().slice(-4)}${Math.floor(10 + Math.random() * 89)}`;
     const newProject: ProjectCardData = {
-      id: `CEDA-2026-0${Math.floor(100 + Math.random() * 899)}`,
-      stageTag: `[INT-0${Math.floor(100 + Math.random() * 899)}]`,
+      id: `CEDA-INV-${uniqueSuffix}`,
+      stageTag: `[INT-${uniqueSuffix.slice(-4)}]`,
       stageId: 'intake',
       title: dossier.title,
       applicant: {
@@ -3202,7 +3701,7 @@ function MainAppContent() {
       projectedAnnualRevenue: Math.round(dossier.capitalAsk * 1.8),
       riskRating: 'LOW',
       stageProgress: 25,
-      submittedDate: 'Nov 11, 2026',
+      submittedDate: new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }),
       lastUpdated: 'Just now',
       tags: [dossier.sectorTag, 'Docs Verified'],
       reviewers: [
@@ -3219,39 +3718,82 @@ function MainAppContent() {
       ],
       auditLog: [
         {
-          timestamp: 'Nov 11, 2026 ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          timestamp: new Date().toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' }) + ' ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
           action: 'Transferred from Intake Dossiers to Active Stage 1',
           author: 'Ingest Gateway',
         },
       ],
     };
 
-    setProjects((prev) => [newProject, ...prev]);
-    setIntakeDossiers((prev) => prev.filter((d) => d.id !== dossier.id));
-  };
+    resetIdeaLifecycleToIntake({
+      id: newProject.id,
+      code: newProject.stageTag,
+      title: newProject.title,
+      enterpriseName: newProject.applicant?.organization,
+      submitterName: newProject.applicant?.name,
+      omangId: newProject.applicant?.nationalId,
+      capitalAsk: newProject.fundingRequested,
+      sector: newProject.sector,
+    });
 
-  const handleAddNewProject = async (newProj: ProjectCardData) => {
-    setProjects((prev) => [newProj, ...prev]);
-
-    // Also immediately stage into Admin Intake Queue with Registered Company / Entity, UIN & BURS TIN
-    const queueIdea: QueueIdeaItem = {
-      id: String(newProj.id),
-      code: newProj.stageTag || `CEDA-INV-${Date.now().toString().slice(-4)}`,
-      title: newProj.title,
-      category: newProj.sector || 'General',
+    const stagedQueueIdea: QueueIdeaItem = {
+      id: String(newProject.id),
+      code: newProject.stageTag,
+      title: newProject.title,
+      category: newProject.sector || 'General',
       arrivalDate: 'Just now',
       rawTimestamp: Date.now(),
       urgency: 'Standard',
-      capitalAsk: newProj.fundingRequested || 0,
+      capitalAsk: newProject.fundingRequested || 0,
       status: 'in_queue',
       progress: 0,
       slaRemainingDays: 14,
       slaTargetDays: 14,
-      enterpriseName: newProj.applicant?.organization,
-      submitterName: newProj.applicant?.name,
-      omangId: newProj.applicant?.nationalId,
-      cipaUin: newProj.cipaNumber,
-      bursTin: (newProj as any).bursTin,
+      enterpriseName: newProject.applicant?.organization,
+      submitterName: newProject.applicant?.name,
+      omangId: newProject.applicant?.nationalId,
+    };
+
+    setProjects((prev) => [newProject, ...prev]);
+    setQueueIdeas((prev) => mergeIncomingIdeasIntoQueue(prev, [stagedQueueIdea]));
+    setIntakeDossiers((prev) => prev.filter((d) => d.id !== dossier.id));
+
+    publishNewSubmission({
+      ...newProject,
+      enterpriseName: newProject.applicant?.organization,
+      submitterName: newProject.applicant?.name,
+      omangId: newProject.applicant?.nationalId,
+    }).catch(() => {});
+  };
+
+  const handleAddNewProject = async (newProj: ProjectCardData) => {
+    const normalizedProj: ProjectCardData = {
+      ...newProj,
+      stageId: 'intake',
+      submitterId: currentUser?.id,
+      submitterEmail: currentUser?.email,
+    };
+    setProjects((prev) => [normalizedProj, ...prev]);
+
+    // Also immediately stage into Admin Intake Queue with Registered Company / Entity, UIN & BURS TIN
+    const queueIdea: QueueIdeaItem = {
+      id: String(normalizedProj.id),
+      code: normalizedProj.stageTag || `CEDA-INV-${Date.now().toString().slice(-4)}`,
+      title: normalizedProj.title,
+      category: normalizedProj.sector || 'General',
+      arrivalDate: 'Just now',
+      rawTimestamp: Date.now(),
+      urgency: 'Standard',
+      capitalAsk: normalizedProj.fundingRequested || 0,
+      status: 'in_queue',
+      progress: 0,
+      slaRemainingDays: 14,
+      slaTargetDays: 14,
+      enterpriseName: normalizedProj.applicant?.organization,
+      submitterName: normalizedProj.applicant?.name,
+      omangId: normalizedProj.applicant?.nationalId,
+      cipaUin: normalizedProj.cipaNumber,
+      bursTin: (normalizedProj as any).bursTin,
     };
     if (autoScreenOnIngest) {
       queueIdea.screening = evaluateIdeaStatutoryScreening(queueIdea);
@@ -3265,6 +3807,20 @@ function MainAppContent() {
       playNewSubmissionSound();
     }
 
+    // Force fresh Stage 1 lifecycle record so new submissions always begin at Stage 1 ('intake')
+    resetIdeaLifecycleToIntake({
+      id: queueIdea.id,
+      code: queueIdea.code,
+      title: queueIdea.title,
+      enterpriseName: queueIdea.enterpriseName,
+      submitterName: queueIdea.submitterName,
+      omangId: queueIdea.omangId,
+      cipaUin: queueIdea.cipaUin,
+      bursTin: queueIdea.bursTin,
+      capitalAsk: queueIdea.capitalAsk,
+      sector: queueIdea.category,
+    });
+
     liveSubmissionsBufferRef.current = [
       queueIdea,
       ...liveSubmissionsBufferRef.current.filter(
@@ -3273,31 +3829,14 @@ function MainAppContent() {
     ];
     setQueueIdeas((prev) => mergeIncomingIdeasIntoQueue(prev, [queueIdea]));
 
-    // Persist Stage 1 intake company, UIN & BURS metadata in stageJourneyStore
-    upsertIdeaLifecycleRecord(
-      {
-        id: queueIdea.id,
-        code: queueIdea.code,
-        title: queueIdea.title,
-        enterpriseName: queueIdea.enterpriseName,
-        submitterName: queueIdea.submitterName,
-        omangId: queueIdea.omangId,
-        cipaUin: queueIdea.cipaUin,
-        bursTin: queueIdea.bursTin,
-        capitalAsk: queueIdea.capitalAsk,
-        sector: queueIdea.category,
-      },
-      (prev) => prev
-    );
-
     // Broadcast across all connected clients via Firestore & BroadcastChannel
     publishNewSubmission({
-      ...newProj,
-      enterpriseName: newProj.applicant?.organization,
-      submitterName: newProj.applicant?.name,
-      omangId: newProj.applicant?.nationalId,
-      cipaUin: newProj.cipaNumber,
-      bursTin: (newProj as any).bursTin,
+      ...normalizedProj,
+      enterpriseName: normalizedProj.applicant?.organization,
+      submitterName: normalizedProj.applicant?.name,
+      omangId: normalizedProj.applicant?.nationalId,
+      cipaUin: normalizedProj.cipaNumber,
+      bursTin: (normalizedProj as any).bursTin,
     }).catch((err) =>
       console.warn('Firestore new submission broadcast notice:', err)
     );
@@ -3435,11 +3974,46 @@ function MainAppContent() {
     handleConfirmBatchAssignment(queueId, chosenEvaluator.id, count, 'Quick Batch Allocation');
   };
 
-  // Subscribe to real-time Firebase Admin Alerts
+  // Subscribe to real-time Firebase Admin & SLA Alerts
   useEffect(() => {
     if (!currentUser) return;
     const unsubAlerts = subscribeToAdminAlerts((remoteAlerts) => {
       if (!remoteAlerts || remoteAlerts.length === 0) return;
+
+      const userEmailLower = (currentUser.email || '').trim().toLowerCase();
+      const userRole = currentUser.role;
+      const isInitialSeed = !adminAlertsSeededRef.current;
+
+      const newlyArrivedTargeted: AdminAlertNotification[] = [];
+      remoteAlerts.forEach((a) => {
+        if (!a.id) return;
+        const alreadySeen = seenAdminAlertIdsRef.current.has(a.id);
+        seenAdminAlertIdsRef.current.add(a.id);
+        if (alreadySeen) return;
+
+        const targetEmailLower = (a.targetUserEmail || '').trim().toLowerCase();
+        const isForMe =
+          userRole !== 'Submitter' &&
+          (a.targetUserId === currentUser.id ||
+            (userEmailLower && targetEmailLower && targetEmailLower === userEmailLower) ||
+            (!a.targetUserId && !targetEmailLower && a.targetUserRole === userRole));
+
+        const isRecent =
+          !isInitialSeed ||
+          (typeof a.createdAtMs === 'number' && Date.now() - a.createdAtMs < 15000);
+
+        if (isForMe && isRecent) {
+          newlyArrivedTargeted.push(a);
+        }
+      });
+      adminAlertsSeededRef.current = true;
+
+      if (newlyArrivedTargeted.length > 0 && (userRole === 'Evaluator' || userRole === 'Adjudicator')) {
+        triggerEvaluatorAssignmentChime();
+        const firstAlert = newlyArrivedTargeted[0];
+        showToast(`⚠️ SLA / Priority Alert: ${firstAlert.title} — ${firstAlert.message}`);
+      }
+
       setAdminAlerts((prev) => {
         const existingIds = new Set(prev.map((a) => a.id));
         const newOnes = remoteAlerts.filter((a) => a.id && !existingIds.has(a.id));
@@ -3448,7 +4022,7 @@ function MainAppContent() {
       });
     });
     return () => unsubAlerts();
-  }, [currentUser?.id]);
+  }, [currentUser?.id, currentUser?.email, currentUser?.role]);
 
   // Administrator Operations: Register New Official in Firebase Auth + PostgreSQL & Send Verification Email
   const handleInviteUser = async (
@@ -3714,6 +4288,7 @@ function MainAppContent() {
   // Administrator Operations: Workflow Architect
   const handleSaveWorkflowCycle = (updatedCycles: WorkflowCycle[], activeCycleId: string) => {
     setWorkflowCycles(updatedCycles);
+    publishWorkflowCycles(updatedCycles).catch(() => {});
     const active = updatedCycles.find((c) => c.id === activeCycleId);
     showToast(`Activated Workflow Cycle: "${active?.title || 'Updated'}"!`);
   };
@@ -3721,6 +4296,7 @@ function MainAppContent() {
   // Administrator Operations: Application Form Builder
   const handleSaveFields = (updatedFields: ApplicationFormField[]) => {
     setApplicationFields(updatedFields);
+    publishApplicationFields(updatedFields).catch(() => {});
     showToast(`Published updated Citizen Application Form with ${updatedFields.length} fields!`);
   };
 
@@ -3803,10 +4379,14 @@ function MainAppContent() {
     if (!station) return;
 
     const orphanedIds = Array.isArray(station.assignedIdeaIds) ? station.assignedIdeaIds : [];
+    const orphanedMsgIds = Array.isArray(station.assignedMessageIds) ? station.assignedMessageIds : [];
+    const isAgentStation = station.user.role === 'Agent';
+
+    if (orphanedIds.length > 0 || orphanedMsgIds.length > 0) {
+      pushUndoSnapshot();
+    }
 
     if (orphanedIds.length > 0) {
-      pushUndoSnapshot();
-
       // Keep every assigned idea right on the canvas as an unassigned card so zero ideas are lost
       setIdeaCustomPositions((prev) => {
         const next = { ...prev };
@@ -3856,21 +4436,48 @@ function MainAppContent() {
         });
         return next;
       });
-
-      setPersonnel((prev) =>
-        prev.map((p) =>
-          p.id === station.userId
-            ? { ...p, assignedIdeasCount: Math.max(0, p.assignedIdeasCount - orphanedIds.length) }
-            : p
-        )
-      );
     }
 
+    // Always wipe any persisted idea assignments for this removed official so their queue is completely reset
+    deleteAllAssignmentsForUser(station.userId, station.user.email).catch(() => { });
+
+    // Also reset assigned citizen enquiries back to Admin's queue when an Agent is removed
+    const matchingEnquiries = enquiryMessages.filter(
+      (msg) =>
+        msg.status !== 'resolved' &&
+        (orphanedMsgIds.includes(msg.id) ||
+          (isAgentStation && (msg.assignedAgentId === station.userId || (station.user.email && msg.assignedAgentEmail?.toLowerCase() === station.user.email.toLowerCase()))))
+    );
+    if (matchingEnquiries.length > 0) {
+      const updatedMap = new Map<string, SubmitterEnquiryMessage>();
+      matchingEnquiries.forEach((msg) => {
+        const resetMsg: SubmitterEnquiryMessage = {
+          ...msg,
+          status: 'in_queue',
+          assignedAgentId: undefined,
+          assignedAgentName: undefined,
+          assignedAgentEmail: undefined,
+        };
+        updatedMap.set(msg.id, resetMsg);
+        publishCitizenEnquiry(resetMsg).catch(console.warn);
+      });
+      setEnquiryMessages((prev) => prev.map((m) => updatedMap.get(m.id) || m));
+    }
+
+    setPersonnel((prev) =>
+      prev.map((p) =>
+        p.id === station.userId
+          ? { ...p, assignedIdeasCount: 0, assignedMessagesCount: 0 }
+          : p
+      )
+    );
+
     setCanvasStations((prev) => prev.filter((s) => s.id !== stationId));
+    const resetCount = orphanedIds.length + matchingEnquiries.length;
     showToast(
-      orphanedIds.length > 0
-        ? `Removed ${station.user.name}. ${orphanedIds.length} idea(s) remain unassigned on the canvas — drag them onto any new official card to reassign.`
-        : `Removed ${station.user.name} station from canvas.`
+      resetCount > 0
+        ? `Removed ${station.user.name}. Queue reset and ${resetCount} item(s) returned for reassignment.`
+        : `Removed ${station.user.name} station from canvas and reset queue.`
     );
   };
 
@@ -4000,6 +4607,14 @@ function MainAppContent() {
       })
     );
 
+    const adjStageDef = isAssigningToAdjudicator
+      ? ([...(activeWorkflowCycle?.stages || [])]
+          .sort((a, b) => a.stepNumber - b.stepNumber)
+          .find((s) => s.stepNumber === 5 && s.assignedRole === 'Adjudicator') ||
+          [...(activeWorkflowCycle?.stages || [])].find((s) => s.assignedRole === 'Adjudicator') ||
+          [...(activeWorkflowCycle?.stages || [])].find((s) => s.stepNumber === 5))
+      : undefined;
+
     setAssignedIdeasMap((prev) => {
       const updated = { ...prev };
       finalIdeasToAssign.forEach((idea) => {
@@ -4007,8 +4622,17 @@ function MainAppContent() {
           ...idea,
           evaluatorId: station.userId,
           status: isAssigningToAdjudicator ? 'completed' : 'evaluating',
-          progress: isAssigningToAdjudicator ? 100 : Math.floor(10 + Math.random() * 25),
-          ...(isAssigningToAdjudicator ? { stageId: 'approval_board', stage: 'adjudication' } : {}),
+          progress: isAssigningToAdjudicator ? 55 : Math.floor(10 + Math.random() * 25),
+          ...(isAssigningToAdjudicator
+            ? {
+                stageId: 'approval_board',
+                stage: 'adjudication',
+                currentStepNumber: adjStageDef?.stepNumber ?? 5,
+                currentWorkflowStageName: adjStageDef?.name ?? 'Adjudication Board Chamber',
+                slaRemainingDays: adjStageDef?.targetTurnaroundDays ?? 4,
+                slaTargetDays: adjStageDef?.targetTurnaroundDays ?? 4,
+              }
+            : {}),
         } as QueueIdeaItem;
       });
       return updated;
@@ -4087,7 +4711,16 @@ function MainAppContent() {
     // 3. Persist assignment to Firestore for evaluator/adjudicator cross-device & cross-login hydration
     finalIdeasToAssign.forEach((idea) => {
       const enrichedIdea = isAssigningToAdjudicator
-        ? ({ ...idea, stageId: 'approval_board', stage: 'adjudication' } as any)
+        ? ({
+            ...idea,
+            stageId: 'approval_board',
+            stage: 'adjudication',
+            currentStepNumber: adjStageDef?.stepNumber ?? 5,
+            currentWorkflowStageName: adjStageDef?.name ?? 'Adjudication Board Chamber',
+            slaRemainingDays: adjStageDef?.targetTurnaroundDays ?? 4,
+            slaTargetDays: adjStageDef?.targetTurnaroundDays ?? 4,
+            progress: 55,
+          } as any)
         : idea;
       saveIdeaAssignment({
         innovationId: idea.id,
@@ -4114,6 +4747,27 @@ function MainAppContent() {
     const toStation = canvasStations.find((s) => s.id === toStationId);
     if (!fromStation || !toStation) return;
 
+    const isReassigningToAdjudicator = toStation.user.role === 'Adjudicator';
+    const existingIdea = assignedIdeasMap[ideaId];
+    const updatedIdea: QueueIdeaItem | undefined = existingIdea
+      ? {
+          ...existingIdea,
+          evaluatorId: toStation.userId,
+          status: 'evaluating',
+          ...(isReassigningToAdjudicator
+            ? {
+                stageId: 'approval_board',
+                currentStepNumber:
+                  existingIdea.currentStepNumber && existingIdea.currentStepNumber >= 5
+                    ? existingIdea.currentStepNumber
+                    : 5,
+                currentWorkflowStageName:
+                  existingIdea.currentWorkflowStageName || 'Adjudication Board Chamber',
+              }
+            : {}),
+        }
+      : undefined;
+
     setCanvasStations((prev) =>
       prev.map((s) => {
         if (s.id === fromStationId) {
@@ -4123,23 +4777,22 @@ function MainAppContent() {
           const nextIds = s.assignedIdeaIds.includes(ideaId)
             ? s.assignedIdeaIds
             : [...s.assignedIdeaIds, ideaId];
-          return { ...s, assignedIdeaIds: nextIds };
+          return {
+            ...s,
+            assignedIdeaIds: nextIds,
+            targetCapacity: Math.max(s.targetCapacity, nextIds.length),
+          };
         }
         return s;
       })
     );
 
-    setAssignedIdeasMap((prev) => {
-      const existing = prev[ideaId];
-      if (!existing) return prev;
-      return {
+    if (updatedIdea) {
+      setAssignedIdeasMap((prev) => ({
         ...prev,
-        [ideaId]: {
-          ...existing,
-          evaluatorId: toStation.userId,
-        },
-      };
-    });
+        [ideaId]: updatedIdea,
+      }));
+    }
 
     setPersonnel((prev) =>
       prev.map((p) => {
@@ -4153,8 +4806,43 @@ function MainAppContent() {
       })
     );
 
-    const ideaCode = assignedIdeasMap[ideaId]?.code || ideaId;
+    const ideaCode = existingIdea?.code || ideaId;
     deleteIdeaAssignment(fromStation.userId, ideaId).catch(console.warn);
+
+    if (updatedIdea) {
+      if (isReassigningToAdjudicator) {
+        recordIdeaAuditEvent(updatedIdea, {
+          action: `Reassigned to Adjudicator: ${toStation.user.name} for Stage 5 Board Adjudication`,
+          author: currentUser ? `${currentUser.firstName} ${currentUser.lastName}`.trim() : 'Administrator',
+          authorRole: 'Administrator',
+          tabName: 'Stage 5 Adjudication Reassignment',
+          eventType: 'stage_transition',
+          notes: `Reassigned proposal "${updatedIdea.title}" from ${fromStation.user.name} to Adjudicator ${toStation.user.name}.`,
+        });
+      } else {
+        recordEvaluatorAssignmentLifecycle(updatedIdea, toStation.user.name, toStation.userId);
+      }
+
+      saveIdeaAssignment({
+        innovationId: String(updatedIdea.id),
+        ideaTitle: updatedIdea.title,
+        evaluatorId: toStation.userId,
+        evaluatorEmail: toStation.user.email || '',
+        evaluatorName: toStation.user.name,
+        assignedAt: new Date().toISOString(),
+        status: 'assigned',
+        idea: updatedIdea,
+      }).catch(console.warn);
+
+      publishNotification({
+        innovationId: String(updatedIdea.id),
+        type: 'Idea assigned',
+        message: `Proposal reassigned to ${toStation.user.name}: ${updatedIdea.title}`,
+        user: currentUser ? `${currentUser.firstName} ${currentUser.lastName}`.trim() : 'Administrator',
+        targetRole: toStation.user.role,
+      }).catch(console.warn);
+    }
+
     showToast(`Reassigned ${ideaCode} from ${fromStation.user.name} to ${toStation.user.name}`);
   };
 
@@ -4546,8 +5234,15 @@ function MainAppContent() {
     return screening;
   };
 
-  const handleBatchScreenQueueIdeas = async () => {
-    if (queueIdeas.length === 0) return;
+  const handleBatchScreenQueueIdeas = async (): Promise<{
+    verifiedCount: number;
+    partialCount: number;
+    failedCount: number;
+    totalCount: number;
+  }> => {
+    if (queueIdeas.length === 0) {
+      return { verifiedCount: 0, partialCount: 0, failedCount: 0, totalCount: 0 };
+    }
     setIsBatchScreening(true);
     try {
       const enrichedQueue = queueIdeas.map((i) => enrichQueueIdeaWithProjectData(i));
@@ -4634,9 +5329,111 @@ function MainAppContent() {
       showToast(
         `🛡️ CIPA & BURS Batch Screening Complete: ${verifiedCount} Verified, ${partialCount} Partial, ${failedCount} Failed.`
       );
+      return { verifiedCount, partialCount, failedCount, totalCount: queueIdeas.length };
     } finally {
       setIsBatchScreening(false);
     }
+  };
+
+  const handleAiVerifyAllQueue = async (): Promise<string> => {
+    if (queueIdeas.length === 0) {
+      return 'Intake Queue is currently empty — no ideas require screening verification.';
+    }
+    const summary = await handleBatchScreenQueueIdeas();
+    return `AI CIPA & BURS Screening verified ${summary.totalCount} queued idea(s): ${summary.verifiedCount} Verified, ${summary.partialCount} Partial, ${summary.failedCount} Failed.`;
+  };
+
+  const handleAiAutoAssignQueue = async (
+    targetQueue: 'ideas' | 'adjudication' | 'both' = 'ideas',
+    maxCount?: number
+  ): Promise<string> => {
+    const notes: string[] = [];
+
+    if (targetQueue === 'ideas' || targetQueue === 'both') {
+      const evaluatorStations = canvasStations.filter((s) => s.user.role === 'Evaluator');
+      if (evaluatorStations.length === 0) {
+        notes.push('No Evaluator stations are placed on the Admin canvas yet. Drag at least one Evaluator onto the canvas to receive ideas.');
+      } else {
+        const eligible = enforceStatutoryGate
+          ? queueIdeas.filter((i) => i.screening?.status === 'verified')
+          : [...queueIdeas];
+        const capped = typeof maxCount === 'number' && maxCount > 0 ? eligible.slice(0, maxCount) : eligible;
+
+        if (capped.length === 0) {
+          notes.push(
+            enforceStatutoryGate && queueIdeas.length > 0
+              ? `0 of ${queueIdeas.length} queued ideas are Stage 2 verified yet. Run "AI Verify Queue Now" first or disable the Stage 2 Gate.`
+              : 'Intake Queue has no eligible ideas to assign.'
+          );
+        } else {
+          const buckets = new Map<string, string[]>();
+          const loads = new Map<string, number>();
+          evaluatorStations.forEach((st) => {
+            buckets.set(st.id, []);
+            loads.set(st.id, st.assignedIdeaIds.length);
+          });
+
+          capped.forEach((idea) => {
+            const target = [...evaluatorStations].sort(
+              (a, b) => (loads.get(a.id) || 0) - (loads.get(b.id) || 0)
+            )[0];
+            buckets.get(target.id)?.push(idea.id);
+            loads.set(target.id, (loads.get(target.id) || 0) + 1);
+          });
+
+          let totalAssigned = 0;
+          buckets.forEach((ids, stationId) => {
+            if (ids.length > 0) {
+              handleAssignIdeasToStation(stationId, ids);
+              totalAssigned += ids.length;
+            }
+          });
+          notes.push(
+            `Load-balanced and assigned ${totalAssigned} Intake Queue idea(s) across ${evaluatorStations.length} Evaluator station(s).`
+          );
+        }
+      }
+    }
+
+    if (targetQueue === 'adjudication' || targetQueue === 'both') {
+      const adjudicatorStations = canvasStations.filter((s) => s.user.role === 'Adjudicator');
+      if (adjudicatorStations.length === 0) {
+        notes.push('No Adjudicator stations are placed on the Admin canvas yet.');
+      } else {
+        const adjList = typeof maxCount === 'number' && maxCount > 0 ? adjudicationQueueIdeas.slice(0, maxCount) : adjudicationQueueIdeas;
+        if (adjList.length === 0) {
+          notes.push('Adjudication Queue is currently empty.');
+        } else {
+          const buckets = new Map<string, string[]>();
+          const loads = new Map<string, number>();
+          adjudicatorStations.forEach((st) => {
+            buckets.set(st.id, []);
+            loads.set(st.id, st.assignedIdeaIds.length);
+          });
+          adjList.forEach((idea) => {
+            const target = [...adjudicatorStations].sort(
+              (a, b) => (loads.get(a.id) || 0) - (loads.get(b.id) || 0)
+            )[0];
+            buckets.get(target.id)?.push(idea.id);
+            loads.set(target.id, (loads.get(target.id) || 0) + 1);
+          });
+          let adjAssigned = 0;
+          buckets.forEach((ids, stationId) => {
+            if (ids.length > 0) {
+              handleAssignIdeasToStation(stationId, ids);
+              adjAssigned += ids.length;
+            }
+          });
+          notes.push(
+            `Assigned ${adjAssigned} Adjudication Queue idea(s) across ${adjudicatorStations.length} Adjudicator station(s).`
+          );
+        }
+      }
+    }
+
+    const summary = notes.join(' ');
+    if (summary) showToast(`🤖 ${summary}`);
+    return summary || 'Completed AI queue assignment check.';
   };
 
   const handleSaveStatutoryScreening = (ideaId: string, screening: StatutoryScreeningRecord) => {
@@ -5011,7 +5808,7 @@ function MainAppContent() {
       : new Set(syncedAdjudicationIdeas.map((i) => String(i.id)));
     const isActiveForReviewer = (i: QueueIdeaItem) => {
       if (isAdjudicator) {
-        return (i.status as string) !== 'adjudicated' && (i as any).stageId !== 'pilot_phase';
+        return (i.status as string) !== 'archived_complete';
       }
       return i.status !== 'completed' && !promotedSet.has(String(i.id));
     };
@@ -5036,7 +5833,10 @@ function MainAppContent() {
     );
 
     const fromAssigned = Object.values(assignedIdeasMap).filter(
-      (idea) => idea.status === 'completed' || (idea as any).stage === 'adjudication' || (idea as any).stageId === 'approval_board'
+      (idea) =>
+        idea.status === 'completed' ||
+        (idea as any).stage === 'adjudication' ||
+        (idea as any).stageId === 'approval_board'
     );
     const fromProjects: QueueIdeaItem[] = projects
       .filter((p) => p.stageId === 'approval_board' || (p as any).status === 'completed')
@@ -5064,10 +5864,158 @@ function MainAppContent() {
     return Array.from(map.values()).filter(
       (item) =>
         !adjudicatorAssignedIds.has(String(item.id)) &&
-        (item.status as string) !== 'adjudicated' &&
-        (item as any).stageId !== 'pilot_phase'
+        item.status !== 'adjudicated' &&
+        (item.status as string) !== 'archived_complete' &&
+        !item.finalWorkflowCompleted &&
+        item.stageId !== 'pilot_phase' &&
+        item.stageId !== 'implementation' &&
+        item.stageId !== 'realized_impact'
     );
   }, [assignedIdeasMap, projects, syncedAdjudicationIdeas, canvasStations]);
+
+  // Automatic SLA Violation Alert Monitor for Evaluators, Adjudicators & Admin Dispatch
+  useEffect(() => {
+    if (!currentUser) return;
+    if (!isEvaluator && !isAdjudicator && !isAdmin) return;
+
+    if (isEvaluator || isAdjudicator) {
+      const breachedIdeas = evaluatorAssignedIdeas.filter(
+        (idea) =>
+          typeof idea.slaRemainingDays === 'number' &&
+          idea.slaRemainingDays <= slaWarningDays &&
+          idea.status !== 'adjudicated' &&
+          (idea.status as string) !== 'archived_complete'
+      );
+
+      breachedIdeas.forEach((idea) => {
+        const isCritical = (idea.slaRemainingDays ?? 999) <= slaCriticalDays;
+        const severity: 'warning' | 'critical' = isCritical ? 'critical' : 'warning';
+        const dedupeKey = `self:${currentUser.id}:${idea.id}:${severity}`;
+        if (emittedSlaAlertKeysRef.current.has(dedupeKey)) return;
+
+        const alreadyRecorded = adminAlerts.some(
+          (a) =>
+            a.type === 'sla_warning' &&
+            (a.targetUserId === currentUser.id ||
+              (a.targetUserEmail && a.targetUserEmail.toLowerCase() === (currentUser.email || '').toLowerCase())) &&
+            a.relatedIdeaCode === idea.code &&
+            (isCritical ? a.title.toLowerCase().includes('critical') : true)
+        );
+        emittedSlaAlertKeysRef.current.add(dedupeKey);
+        if (alreadyRecorded) return;
+
+        const alertId = `sla-auto-${currentUser.id}-${idea.id}-${severity}-${Date.now()}`;
+        const title = isCritical ? 'Critical SLA Violation' : 'SLA Threshold Warning';
+        const message = `"${idea.title}" (${idea.code}) has ${Math.max(0, idea.slaRemainingDays ?? 0)}d remaining (SLA threshold: <= ${isCritical ? slaCriticalDays : slaWarningDays}d).`;
+        const officialName = `${currentUser.firstName} ${currentUser.lastName}`.trim() || currentUser.role;
+
+        const newAlert: AdminAlertNotification = {
+          id: alertId,
+          targetUserId: currentUser.id,
+          targetUserEmail: currentUser.email,
+          targetUserName: officialName,
+          targetUserRole: currentUser.role,
+          targetRole: currentUser.role,
+          type: 'sla_warning',
+          alertType: 'sla_warning',
+          title,
+          message,
+          relatedIdeaCode: idea.code,
+          timestamp: 'Just now',
+          createdAt: 'Just now',
+          read: false,
+        };
+
+        setAdminAlerts((prev) => [newAlert, ...prev.slice(0, 49)]);
+        publishAdminAlert({
+          id: alertId,
+          targetUserId: currentUser.id,
+          targetUserEmail: currentUser.email,
+          targetUserName: officialName,
+          targetUserRole: currentUser.role,
+          type: 'sla_warning',
+          title,
+          message,
+          relatedIdeaCode: idea.code,
+        }).catch(() => {});
+
+        publishNotification({
+          innovationId: idea.code || String(idea.id),
+          type: 'SLA Violation',
+          message: `${title}: ${message}`,
+          user: 'CEDA SLA Monitor',
+          targetRole: currentUser.role,
+          targetEmail: currentUser.email,
+          ideaTitle: idea.title,
+        }).catch(() => {});
+
+        triggerEvaluatorAssignmentChime();
+        showToast(`⚠️ ${title}: "${idea.title}" (${Math.max(0, idea.slaRemainingDays ?? 0)}d left)`);
+      });
+      return;
+    }
+
+    if (isAdmin) {
+      canvasStations.forEach((station) => {
+        if (station.user.role !== 'Evaluator' && station.user.role !== 'Adjudicator') return;
+        (station.assignedIdeaIds || []).forEach((ideaId) => {
+          const idea = assignedIdeasMap[ideaId];
+          if (
+            !idea ||
+            typeof idea.slaRemainingDays !== 'number' ||
+            idea.slaRemainingDays > slaWarningDays ||
+            idea.status === 'adjudicated' ||
+            (idea.status as string) === 'archived_complete'
+          ) {
+            return;
+          }
+          const isCritical = idea.slaRemainingDays <= slaCriticalDays;
+          const severity: 'warning' | 'critical' = isCritical ? 'critical' : 'warning';
+          const dedupeKey = `admin-sla:${station.user.id}:${idea.id}:${severity}`;
+          if (emittedSlaAlertKeysRef.current.has(dedupeKey)) return;
+          emittedSlaAlertKeysRef.current.add(dedupeKey);
+
+          const alertId = `sla-dispatch-${station.user.id}-${idea.id}-${severity}-${Date.now()}`;
+          const title = isCritical ? 'Critical SLA Violation' : 'SLA Threshold Warning';
+          const message = `Assigned idea "${idea.title}" (${idea.code}) has ${Math.max(0, idea.slaRemainingDays)}d remaining on your desk.`;
+
+          publishAdminAlert({
+            id: alertId,
+            targetUserId: station.user.id,
+            targetUserEmail: station.user.email,
+            targetUserName: station.user.name,
+            targetUserRole: station.user.role,
+            type: 'sla_warning',
+            title,
+            message,
+            relatedIdeaCode: idea.code,
+          }).catch(() => {});
+
+          publishNotification({
+            innovationId: idea.code || String(idea.id),
+            type: 'SLA Violation',
+            message: `${title}: ${message}`,
+            user: 'CEDA SLA Monitor',
+            targetRole: station.user.role,
+            targetEmail: station.user.email,
+            ideaTitle: idea.title,
+          }).catch(() => {});
+        });
+      });
+    }
+  }, [
+    currentUser?.id,
+    currentUser?.email,
+    currentUser?.role,
+    isAdmin,
+    isEvaluator,
+    isAdjudicator,
+    evaluatorAssignedIdeas,
+    canvasStations,
+    assignedIdeasMap,
+    slaWarningDays,
+    slaCriticalDays,
+  ]);
 
   if (authLoading) {
     return (
@@ -5150,6 +6098,14 @@ function MainAppContent() {
         onOpenAdminPanel={() => setIsAdminPanelOpen(true)}
         onOpenSubmitterPanel={() => setCurrentView('submitter')}
         unreadNotificationsCount={unreadNotificationsCount}
+        workspaceCollaborators={activeWorkspaceCursors}
+        isWorkspaceOwner={workspacesList.find((w) => w.id === activeWorkspaceId)?.isOwner ?? true}
+        activeWorkspaceOwnerId={workspacesList.find((w) => w.id === activeWorkspaceId)?.ownerId}
+        activeWorkspaceName={activeWorkspaceName}
+        onOpenShareWorkspace={() => setIsShareWorkspaceOpen(true)}
+        onRemoveCollaborator={handleRemoveWorkspaceCollaborator}
+        onReturnToOwnWorkspace={handleReturnToOwnWorkspace}
+        onCancelCollaboration={() => handleCancelWorkspaceCollaboration()}
       />
 
       {/* CEDA Modules Drawer Popover (Anchored under 9-dot launcher) */}
@@ -5252,7 +6208,7 @@ function MainAppContent() {
                 ) : (
                   /* Non-Admin Left Sidebar: Innovation Intake Dossiers */
                   <InnovationIntakeSidebar
-                    dossiers={intakeDossiers}
+                    dossiers={currentUser?.role === 'Submitter' ? [] : intakeDossiers}
                     isOpen={isSidebarOpen}
                     onToggle={() => setIsSidebarOpen(!isSidebarOpen)}
                     onAdvanceToStage1={handleAdvanceDossierToStage1}
@@ -5268,11 +6224,11 @@ function MainAppContent() {
                     personnel={personnel}
                     workflowCycle={activeWorkflowCycle}
                     applicationFields={applicationFields}
-                    queueIdeas={isEvaluator || isAdjudicator ? evaluatorAssignedIdeas : queueIdeas}
+                    queueIdeas={isEvaluator ? evaluatorAssignedIdeas : isAdjudicator ? [] : queueIdeas}
                     canvasStations={canvasStations}
                     canvasPools={canvasPools}
                     assignedIdeasMap={assignedIdeasMap}
-                    adjudicationIdeas={adjudicationQueueIdeas}
+                    adjudicationIdeas={isAdjudicator ? evaluatorAssignedIdeas : adjudicationQueueIdeas}
                     density={density}
                     onDensityChange={setDensity}
                     zoom={zoom}
@@ -5383,6 +6339,8 @@ function MainAppContent() {
                     onReassignIdeaBetweenStations={handleReassignIdeaBetweenStations}
                     onOpenShareWorkspace={() => setIsShareWorkspaceOpen(true)}
                     activeWorkspaceName={activeWorkspaceName}
+                    isWorkspaceOwner={workspacesList.find((w) => w.id === activeWorkspaceId)?.isOwner ?? true}
+                    activeWorkspaceOwnerId={workspacesList.find((w) => w.id === activeWorkspaceId)?.ownerId}
                     canvasTheme={canvasTheme}
                     onCanvasThemeChange={setCanvasTheme}
                     showGrid={showGrid}
@@ -5398,6 +6356,37 @@ function MainAppContent() {
                     presenceMap={presenceMap}
                     workspaceCollaborators={activeWorkspaceCursors}
                     onPublishCursorPosition={handlePublishCursorPosition}
+                    onRemoveCollaborator={handleRemoveWorkspaceCollaborator}
+                    onReturnToOwnWorkspace={handleReturnToOwnWorkspace}
+                    onCancelCollaboration={() => handleCancelWorkspaceCollaboration()}
+                    onOpenFaqFeedbackAdmin={(tab) => {
+                      setAdminPanelInitialTab(tab);
+                      setIsAdminPanelOpen(true);
+                    }}
+                    onOpenAiAssistant={() => setIsAiDrawerOpen((prev) => !prev)}
+                    isAiAssistantOpen={isAiDrawerOpen}
+                    onOpenAdjudicateModal={(idea) => {
+                      const matched = projects.find(
+                        (p) => String(p.id) === String(idea.id) || p.title === idea.title
+                      );
+                      if (matched) {
+                        setAdjudicatingProject(matched);
+                        return;
+                      }
+                      setAdjudicatingProject({
+                        id: idea.id,
+                        innovationNumber: idea.code || idea.id,
+                        stageTag: idea.code,
+                        title: idea.title,
+                        description: idea.title,
+                        sector: idea.category || 'AgriTech & Food',
+                        fundingRequested: idea.capitalAsk || 750000,
+                        applicant: {
+                          name: idea.submitterName || 'Citizen Promoter',
+                          organization: idea.enterpriseName || 'Enterprise Profile',
+                        },
+                      });
+                    }}
                     onAdvanceIdeaStage={handleAdvanceIdeaStage}
                     onOpenDossier={(ideaId) => {
                       const proj = projects.find((p) => p.id === ideaId);
@@ -5547,10 +6536,10 @@ function MainAppContent() {
                     }}
                   />
                 ) : (
-                  /* Reviewer / Evaluator / Adjudicator Canvas: Detailed Project Cards */
+                  /* Submitter / Reviewer Canvas: Detailed Project Cards */
                   <CanvasBoard
-                    projects={projects}
-                    connectors={connectors}
+                    projects={submitterScopedProjects}
+                    connectors={currentUser?.role === 'Submitter' ? [] : connectors}
                     density={density}
                     onDensityChange={setDensity}
                     zoom={zoom}
@@ -5570,6 +6559,12 @@ function MainAppContent() {
                     onCanvasThemeChange={setCanvasTheme}
                     showGrid={showGrid}
                     onToggleGrid={() => setShowGrid((prev) => !prev)}
+                    workflowCycle={activeWorkflowCycle}
+                    faqCount={faqItems.length}
+                    onOpenFaqModal={(tab) => {
+                      setSubmitterFaqInitialTab(tab);
+                      setIsSubmitterFaqOpen(true);
+                    }}
                   />
                 )}
               </>
@@ -5590,6 +6585,12 @@ function MainAppContent() {
                   onOpenSubmitModal={() => setIsNewProjectModalOpen(true)}
                   onRefreshData={refreshFromBackend}
                   presenceMap={presenceMap}
+                  workflowCycle={activeWorkflowCycle}
+                  faqCount={faqItems.length}
+                  onOpenFaqModal={(tab) => {
+                    setSubmitterFaqInitialTab(tab);
+                    setIsSubmitterFaqOpen(true);
+                  }}
                 />
               </div>
             )}
@@ -5627,6 +6628,10 @@ function MainAppContent() {
                   projects={projects}
                   assignedIdeas={evaluatorAssignedIdeas}
                   activeWorkspaceName={workspacesList.find((w) => w.id === activeWorkspaceId)?.name || 'My Workspace'}
+                  queueIdeas={queueIdeas}
+                  allAssignedIdeas={Object.values(assignedIdeasMap)}
+                  adjudicationIdeas={adjudicationQueueIdeas}
+                  workflowCycle={activeWorkflowCycle}
                 />
               </div>
             )}
@@ -5700,8 +6705,13 @@ function MainAppContent() {
         }}
         onLoadSampleData={handleResetCanvasToDefault}
         currentUserName={`${currentUser.firstName} ${currentUser.lastName}`.trim()}
+        currentUserId={currentUser.id}
+        currentUserEmail={currentUser.email}
         personnel={personnel}
         liveCollaborators={activeWorkspaceCursors}
+        onRemoveCollaborator={handleRemoveWorkspaceCollaborator}
+        onReturnToOwnWorkspace={handleReturnToOwnWorkspace}
+        onCancelCollaboration={handleCancelWorkspaceCollaboration}
         onInviteSent={async (invitedEmail) => {
           const inviterName = `${currentUser.firstName} ${currentUser.lastName}`.trim() || currentUser.email;
           await handleSaveWorkspaceNow();
@@ -5896,7 +6906,43 @@ function MainAppContent() {
           setAlertTargetUser(user || null);
           setIsAlertModalOpen(true);
         }}
+        aiAllowAutoScreen={aiAllowAutoScreen}
+        onToggleAiAllowAutoScreen={() => setAiAllowAutoScreen((prev) => !prev)}
+        aiAllowAutoAssign={aiAllowAutoAssign}
+        onToggleAiAllowAutoAssign={() => setAiAllowAutoAssign((prev) => !prev)}
+        queueIdeasCount={queueIdeas.length}
+        unverifiedQueueCount={queueIdeas.filter((i) => i.screening?.status !== 'verified').length}
+        adjudicationQueueCount={adjudicationQueueIdeas.length}
+        onAiVerifyAllQueue={handleAiVerifyAllQueue}
+        onAiAutoAssignAllQueue={() => handleAiAutoAssignQueue('both')}
+        onOpenAiAssistant={() => setIsAiDrawerOpen(true)}
       />
+
+      {/* CEDA Workspace AI Copilot Drawer (Connected to Admin, Evaluator & Adjudicator Workspaces) */}
+      {canUseCustomizableCanvas && (
+        <WorkspaceAiDrawer
+          isOpen={isAiDrawerOpen}
+          onClose={() => setIsAiDrawerOpen(false)}
+          userRole={currentUser.role}
+          userName={`${currentUser.firstName} ${currentUser.lastName}`.trim() || currentUser.email}
+          personnel={personnel}
+          queueIdeas={queueIdeas}
+          adjudicationIdeas={adjudicationQueueIdeas}
+          assignedIdeasMap={assignedIdeasMap}
+          canvasStations={canvasStations}
+          projects={projects}
+          workflowCycle={activeWorkflowCycle}
+          applicationFields={applicationFields}
+          faqItems={faqItems}
+          systemFeedback={systemFeedback}
+          slaWarningDays={slaWarningDays}
+          slaCriticalDays={slaCriticalDays}
+          aiAllowAutoScreen={aiAllowAutoScreen}
+          aiAllowAutoAssign={aiAllowAutoAssign}
+          onAiVerifyQueue={handleAiVerifyAllQueue}
+          onAiAssignQueue={handleAiAutoAssignQueue}
+        />
+      )}
 
       {/* Stage 2: Statutory & Tax Screening Modal (CIPA `cipaget` & BURS) */}
       <StatutoryScreeningModal
@@ -5943,6 +6989,7 @@ function MainAppContent() {
         }}
         onAdvanceStage={handleAdvanceProject}
         onRegressStage={() => { }}
+        workflowCycle={activeWorkflowCycle}
       />
 
       {/* Upload / New Ingest Modal */}
@@ -5950,6 +6997,7 @@ function MainAppContent() {
         isOpen={isNewProjectModalOpen}
         onClose={() => setIsNewProjectModalOpen(false)}
         onSubmit={handleAddNewProject}
+        applicationFields={applicationFields}
       />
 
       {/* Evaluator Scoring Modal (Evaluator Role) */}
@@ -5992,7 +7040,60 @@ function MainAppContent() {
         isOpen={isAdminPanelOpen}
         onClose={() => setIsAdminPanelOpen(false)}
         onRefreshData={refreshFromBackend}
+        initialTab={adminPanelInitialTab}
+        faqItems={faqItems}
+        onSaveFaqs={(updated) => {
+          setFaqItems(updated);
+          publishFaqItems(updated).catch(() => {});
+          showToast(`Updated FAQs (${updated.length} items live for Submitters)`);
+        }}
+        systemFeedback={systemFeedback}
       />
+
+      {/* Submitter FAQ & System Workflow Feedback Modal */}
+      {currentUser.role === 'Submitter' && (
+        <SubmitterFaqFeedbackModal
+          isOpen={isSubmitterFaqOpen}
+          initialTab={submitterFaqInitialTab}
+          onClose={() => setIsSubmitterFaqOpen(false)}
+          faqItems={faqItems}
+          workflowCycle={activeWorkflowCycle}
+          myFeedback={systemFeedback.filter((fb) => {
+            const emailLower = (currentUser.email || '').trim().toLowerCase();
+            return (
+              String(fb.submitterId) === String(currentUser.id) ||
+              (emailLower && fb.submitterEmail?.toLowerCase() === emailLower)
+            );
+          })}
+          onSubmitFeedback={async ({ category, stageContext, rating, comment }) => {
+            const fullName = `${currentUser.firstName} ${currentUser.lastName}`.trim() || currentUser.email;
+            const now = Date.now();
+            const entry: SystemFeedbackItem = {
+              id: `fb-${now}-${Math.random().toString(36).slice(2, 6)}`,
+              submitterId: currentUser.id,
+              submitterName: fullName,
+              submitterEmail: currentUser.email,
+              category: category as SystemFeedbackCategory,
+              stageContext,
+              rating,
+              comment,
+              createdAt: new Date().toLocaleString([], { month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit' }),
+              createdAtMs: now,
+            };
+            setSystemFeedback((prev) => [entry, ...prev]);
+            await publishSystemFeedback(entry);
+            await publishNotification({
+              innovationId: entry.id,
+              type: 'Citizen enquiry',
+              message: `New system/workflow feedback (${rating}/5 ★) from ${fullName}: ${category}`,
+              user: fullName,
+              targetRole: 'Administrator',
+              submitterName: fullName,
+            }).catch(() => {});
+            showToast('🙏 Feedback sent to CEDA Administration!');
+          }}
+        />
+      )}
 
       {/* Firestore Live Activity Feed & Real-Time Presence Drawer */}
       <LiveActivityDrawer
@@ -6005,6 +7106,7 @@ function MainAppContent() {
         assignedOfficialsForSubmitter={assignedOfficialsForSubmitter}
         unreadNotificationsCount={unreadNotificationsCount}
         onMarkNotificationsRead={handleMarkNotificationsRead}
+        adminAlerts={adminAlerts}
         onSwitchWorkspace={(workspaceId) => {
           localStorage.setItem(`ceda_active_workspace_${currentUser.id}`, workspaceId);
           setActiveWorkspaceId(workspaceId);
@@ -6019,7 +7121,7 @@ function MainAppContent() {
       {currentUser.role === 'Submitter' && (
         <SubmitterEnquiryChatWidget
           currentUser={currentUser}
-          projects={projects}
+          projects={submitterScopedProjects}
           myEnquiries={enquiryMessages.filter((e) => {
             const myEmailLower = (currentUser.email || '').trim().toLowerCase();
             const myFullName = `${currentUser.firstName} ${currentUser.lastName}`.trim().toLowerCase();

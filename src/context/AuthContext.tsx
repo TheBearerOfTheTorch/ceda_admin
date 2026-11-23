@@ -102,7 +102,16 @@ const PERSONAS: Record<UserRole, Omit<AppUser, 'id'>> = {
   },
 };
 
-const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const GLOBAL_AUTH_CONTEXT_KEY = '__ceda_auth_context_singleton_v1__';
+const AuthContext: React.Context<AuthContextType | undefined> =
+  ((globalThis as Record<string, unknown>)[GLOBAL_AUTH_CONTEXT_KEY] as
+    | React.Context<AuthContextType | undefined>
+    | undefined) ??
+  (() => {
+    const ctx = createContext<AuthContextType | undefined>(undefined);
+    (globalThis as Record<string, unknown>)[GLOBAL_AUTH_CONTEXT_KEY] = ctx;
+    return ctx;
+  })();
 
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<AppUser | null>(null);

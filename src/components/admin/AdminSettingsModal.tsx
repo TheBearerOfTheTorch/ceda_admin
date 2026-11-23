@@ -32,6 +32,17 @@ interface AdminSettingsModalProps {
   onOpenFormBuilder: () => void;
   onOpenInviteModal: () => void;
   onOpenAlertModal: (user?: AdminPersonnel) => void;
+  // AI Workspace Automation Controls
+  aiAllowAutoScreen?: boolean;
+  onToggleAiAllowAutoScreen?: () => void;
+  aiAllowAutoAssign?: boolean;
+  onToggleAiAllowAutoAssign?: () => void;
+  queueIdeasCount?: number;
+  unverifiedQueueCount?: number;
+  adjudicationQueueCount?: number;
+  onAiVerifyAllQueue?: () => Promise<string>;
+  onAiAutoAssignAllQueue?: () => Promise<string>;
+  onOpenAiAssistant?: () => void;
 }
 
 export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
@@ -58,6 +69,16 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   onOpenFormBuilder,
   onOpenInviteModal,
   onOpenAlertModal,
+  aiAllowAutoScreen = true,
+  onToggleAiAllowAutoScreen,
+  aiAllowAutoAssign = true,
+  onToggleAiAllowAutoAssign,
+  queueIdeasCount = 0,
+  unverifiedQueueCount = 0,
+  adjudicationQueueCount = 0,
+  onAiVerifyAllQueue,
+  onAiAutoAssignAllQueue,
+  onOpenAiAssistant,
 }) => {
   const { currentUser } = useAuth();
   const [activeTab, setActiveTab] = useState<'general' | 'sla' | 'messages' | 'personnel' | 'alerts'>('general');
@@ -65,6 +86,8 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
   const [cohortName, setCohortName] = useState('Vision 2036 Pillar II Cohort (2026/2027)');
   const [inactivityThresholdHours, setInactivityThresholdHours] = useState(48);
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [aiBusyAction, setAiBusyAction] = useState<'verify' | 'assign' | null>(null);
+  const [aiActionResult, setAiActionResult] = useState<string | null>(null);
 
   if (!isOpen || currentUser?.role !== 'Administrator') return null;
 
@@ -337,6 +360,130 @@ export const AdminSettingsModal: React.FC<AdminSettingsModalProps> = ({
                       </>
                     )}
                   </button>
+                </div>
+              </div>
+
+              {/* AI Workspace Copilot & Queue Automation */}
+              <div className="pt-4 border-t border-slate-200 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-[#006194]" />
+                    <h4 className="text-xs font-black text-slate-900 uppercase tracking-wider">
+                      AI Workspace Copilot &amp; Queue Automation
+                    </h4>
+                  </div>
+                  {onOpenAiAssistant && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onClose();
+                        onOpenAiAssistant();
+                      }}
+                      className="px-3 py-1 rounded-lg bg-[#006194] hover:bg-[#004e75] text-white text-[11px] font-bold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Sparkles className="w-3.5 h-3.5 text-amber-300" />
+                      <span>Open AI Copilot</span>
+                    </button>
+                  )}
+                </div>
+
+                {aiActionResult && (
+                  <div className="px-3.5 py-2 rounded-xl bg-emerald-50 border border-emerald-200 text-xs font-semibold text-emerald-800 flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>{aiActionResult}</span>
+                  </div>
+                )}
+
+                <div className="p-4 rounded-xl border border-sky-200 bg-sky-50/40 space-y-3">
+                  <div className="flex items-center justify-between gap-4">
+                    <div>
+                      <h5 className="font-bold text-xs text-slate-900">
+                        Allow AI Copilot to Verify &amp; Screen Queue Ideas ({unverifiedQueueCount} unverified / {queueIdeasCount} total)
+                      </h5>
+                      <p className="text-[11px] text-slate-600 mt-0.5">
+                        Lets the AI batch-verify queued ideas against CIPA Company Registry &amp; BURS Tax Clearance on command.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {onAiVerifyAllQueue && (
+                        <button
+                          type="button"
+                          disabled={aiBusyAction !== null || queueIdeasCount === 0}
+                          onClick={async () => {
+                            setAiBusyAction('verify');
+                            try {
+                              const msg = await onAiVerifyAllQueue();
+                              setAiActionResult(msg);
+                            } finally {
+                              setAiBusyAction(null);
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white font-bold text-[11px] cursor-pointer"
+                        >
+                          {aiBusyAction === 'verify' ? 'Verifying...' : 'AI Verify Queue Now'}
+                        </button>
+                      )}
+                      {onToggleAiAllowAutoScreen && (
+                        <button
+                          type="button"
+                          onClick={onToggleAiAllowAutoScreen}
+                          className={`flex items-center gap-1 px-3 py-1.5 rounded-lg font-bold text-[11px] cursor-pointer ${
+                            aiAllowAutoScreen
+                              ? 'bg-[#006194] text-white'
+                              : 'bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          {aiAllowAutoScreen ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
+                          <span>{aiAllowAutoScreen ? 'Enabled' : 'Disabled'}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="pt-3 border-t border-sky-200/70 flex items-center justify-between gap-4">
+                    <div>
+                      <h5 className="font-bold text-xs text-slate-900">
+                        Allow AI Copilot to Load-Balance &amp; Assign Queue Ideas ({queueIdeasCount} Intake / {adjudicationQueueCount} Board)
+                      </h5>
+                      <p className="text-[11px] text-slate-600 mt-0.5">
+                        Automatically distributes eligible ideas from queues to Evaluators &amp; Adjudicators by lowest active workload.
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      {onAiAutoAssignAllQueue && (
+                        <button
+                          type="button"
+                          disabled={aiBusyAction !== null || (queueIdeasCount === 0 && adjudicationQueueCount === 0)}
+                          onClick={async () => {
+                            setAiBusyAction('assign');
+                            try {
+                              const msg = await onAiAutoAssignAllQueue();
+                              setAiActionResult(msg);
+                            } finally {
+                              setAiBusyAction(null);
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white font-bold text-[11px] cursor-pointer"
+                        >
+                          {aiBusyAction === 'assign' ? 'Assigning...' : 'AI Assign Queue Now'}
+                        </button>
+                      )}
+                      {onToggleAiAllowAutoAssign && (
+                        <button
+                          type="button"
+                          onClick={onToggleAiAllowAutoAssign}
+                          className={`flex items-center gap-1 px-3 py-1.5 rounded-lg font-bold text-[11px] cursor-pointer ${
+                            aiAllowAutoAssign
+                              ? 'bg-[#006194] text-white'
+                              : 'bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          {aiAllowAutoAssign ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
+                          <span>{aiAllowAutoAssign ? 'Enabled' : 'Disabled'}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
                 </div>
               </div>
 

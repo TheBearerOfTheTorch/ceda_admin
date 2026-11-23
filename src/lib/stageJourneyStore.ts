@@ -1,6 +1,6 @@
 import { doc, setDoc, collection, onSnapshot, serverTimestamp } from 'firebase/firestore';
 import { firestore, publishIdeaAuditEvent } from './firebase';
-import { StageId, StatutoryScreeningRecord } from '../types/ceda';
+import { StageId, StageConfig, WorkflowCycle, StatutoryScreeningRecord } from '../types/ceda';
 import { PIPELINE_STAGES } from '../data/mockData';
 import { evaluateIdeaStatutoryScreening } from './cipaScreeningEngine';
 
@@ -161,11 +161,36 @@ export function loadAllLifecycleRecords(): Record<string, IdeaLifecycleRecord> {
   }
 }
 
+const LIFECYCLE_BC_NAME = 'ceda_lifecycle_bc_v1';
+
+function stripUndefinedDeep<T>(value: T): T {
+  if (value === null || value === undefined || typeof value !== 'object') {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    return value
+      .filter((item) => item !== undefined)
+      .map((item) => stripUndefinedDeep(item)) as unknown as T;
+  }
+  const result: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v !== undefined) {
+      result[k] = stripUndefinedDeep(v);
+    }
+  }
+  return result as T;
+}
+
 function saveAllLifecycleRecordsToLocal(records: Record<string, IdeaLifecycleRecord>) {
   if (typeof window === 'undefined') return;
   try {
     localStorage.setItem(LIFECYCLE_STORAGE_KEY, JSON.stringify(records));
     window.dispatchEvent(new CustomEvent(LIFECYCLE_EVENT_NAME, { detail: records }));
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel(LIFECYCLE_BC_NAME);
+      bc.postMessage({ type: 'LIFECYCLE_SYNC', records });
+      bc.close();
+    }
   } catch {
     // ignore storage quota errors
   }
@@ -175,10 +200,11 @@ async function persistRecordToFirestoreAndBackend(record: IdeaLifecycleRecord) {
   if (firestore && record.key) {
     try {
       const safeDocId = record.key.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
+      const cleanRecord = stripUndefinedDeep(record);
       await setDoc(
         doc(firestore, 'idea_lifecycle_records', safeDocId),
         {
-          ...record,
+          ...cleanRecord,
           syncedAt: serverTimestamp(),
         },
         { merge: true }
@@ -871,6 +897,37 @@ export function subscribeToLifecycleRecords(
   window.addEventListener(LIFECYCLE_EVENT_NAME, handleCustomEvent);
   window.addEventListener('storage', handleStorageEvent);
 
+  let bc: BroadcastChannel | null = null;
+  try {
+    if (typeof BroadcastChannel !== 'undefined') {
+      bc = new BroadcastChannel(LIFECYCLE_BC_NAME);
+      bc.onmessage = (ev) => {
+        const incoming = ev?.data?.records as Record<string, IdeaLifecycleRecord> | undefined;
+        if (!incoming || typeof incoming !== 'object') return;
+        const current = loadAllLifecycleRecords();
+        let changed = false;
+        for (const [k, rec] of Object.entries(incoming)) {
+          if (!rec || !rec.key) continue;
+          const existing = current[k];
+          if (!existing || (rec.updatedAt && rec.updatedAt > (existing.updatedAt || ''))) {
+            current[k] = rec;
+            changed = true;
+          }
+        }
+        if (changed) {
+          try {
+            localStorage.setItem(LIFECYCLE_STORAGE_KEY, JSON.stringify(current));
+          } catch {
+            // ignore storage quota errors
+          }
+          onUpdate(current);
+        }
+      };
+    }
+  } catch {
+    bc = null;
+  }
+
   let unsubFirestore: (() => void) | undefined;
   if (firestore) {
     try {
@@ -894,6 +951,7 @@ export function subscribeToLifecycleRecords(
           });
           if (changed) {
             saveAllLifecycleRecordsToLocal(current);
+            onUpdate(current);
           }
         },
         () => {}
@@ -906,6 +964,95 @@ export function subscribeToLifecycleRecords(
   return () => {
     window.removeEventListener(LIFECYCLE_EVENT_NAME, handleCustomEvent);
     window.removeEventListener('storage', handleStorageEvent);
+    try {
+      bc?.close();
+    } catch {
+      // ignore
+    }
     if (unsubFirestore) unsubFirestore();
   };
+}
+
+export function mapStageStepToStageId(stepNumber: number, stageName?: string): StageId {
+  const lower = (stageName || '').toLowerCase();
+  if (lower.includes('archive') || lower.includes('impact') || lower.includes('realized') || stepNumber >= 8) {
+    return 'realized_impact';
+  }
+  if (lower.includes('intake') || lower.includes('ingest') || lower.includes('submission') || stepNumber <= 1) {
+    return 'intake';
+  }
+  if (
+    lower.includes('screen') ||
+    lower.includes('cipa') ||
+    lower.includes('burs') ||
+    (lower.includes('statutory') && !lower.includes('archive')) ||
+    stepNumber === 2
+  ) {
+    return 'screening';
+  }
+  if (lower.includes('expert') || lower.includes('committee') || stepNumber === 4) {
+    return 'expert_review';
+  }
+  if (lower.includes('eval') || lower.includes('appraisal') || stepNumber === 3) {
+    return 'evaluation';
+  }
+  if (lower.includes('adjudic') || lower.includes('board') || stepNumber === 5) {
+    return 'approval_board';
+  }
+  if (lower.includes('pilot') || lower.includes('sandbox') || stepNumber === 6) {
+    return 'pilot_phase';
+  }
+  if (lower.includes('disburs') || lower.includes('implement') || stepNumber === 7) {
+    return 'implementation';
+  }
+  return 'realized_impact';
+}
+
+export function mapWorkflowStagesToPipelineStages(workflowCycle?: WorkflowCycle): StageConfig[] {
+  const rawStages = Array.isArray(workflowCycle?.stages) ? [...workflowCycle.stages] : [];
+  if (rawStages.length === 0) return PIPELINE_STAGES;
+
+  const sorted = rawStages.sort((a, b) => a.stepNumber - b.stepNumber);
+  return sorted.map((stg) => {
+    const mappedId = mapStageStepToStageId(stg.stepNumber, stg.name);
+    const baseMeta = PIPELINE_STAGES.find((p) => p.id === mappedId);
+    const hex = stg.color || baseMeta?.color || '#0284c7';
+    return {
+      id: mappedId,
+      name: stg.name,
+      number: stg.stepNumber,
+      tagPrefix: baseMeta?.tagPrefix || stg.name.slice(0, 3).toUpperCase() || `ST${stg.stepNumber}`,
+      color: hex,
+      bgColor: baseMeta?.bgColor || `${hex}14`,
+      borderColor: hex,
+      activeCount: baseMeta?.activeCount || 0,
+      description: `${stg.assignedRole} Gate • ${stg.thresholdCriteria} (${stg.targetTurnaroundDays}d SLA)`,
+    };
+  });
+}
+
+export function resetIdeaLifecycleToIntake(idea: {
+  id: string | number;
+  code?: string;
+  title: string;
+  enterpriseName?: string;
+  submitterName?: string;
+  omangId?: string;
+  cipaUin?: string;
+  bursTin?: string;
+  capitalAsk?: number;
+  sector?: string;
+}): IdeaLifecycleRecord {
+  const nowStr = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return upsertIdeaLifecycleRecord(idea, (prev) => ({
+    ...prev,
+    currentStageId: 'intake',
+    overallStatus: 'active',
+    isAssignedToEvaluator: false,
+    assignedEvaluatorId: undefined,
+    assignedEvaluatorName: undefined,
+    stageCheckpoints: {
+      intake: buildIntakeCheckpoint(idea, nowStr),
+    },
+  }));
 }

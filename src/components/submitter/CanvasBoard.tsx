@@ -5,8 +5,8 @@ import {
   DependencyConnector,
   CanvasDensity,
   StageId,
+  WorkflowCycle,
 } from '../../types/ceda';
-import { PIPELINE_STAGES } from '../../data/mockData';
 import { ProjectCard } from '../shared/ProjectCard';
 import { StageHistoryInspectorModal } from './StageHistoryInspectorModal';
 import {
@@ -42,6 +42,7 @@ import {
   subscribeToLifecycleRecords,
   IdeaLifecycleRecord,
   recordStageTransitionLifecycle,
+  mapWorkflowStagesToPipelineStages,
 } from '../../lib/stageJourneyStore';
 
 interface InkStroke {
@@ -80,6 +81,9 @@ interface CanvasBoardProps {
   onCanvasThemeChange?: (theme: CanvasTheme) => void;
   showGrid?: boolean;
   onToggleGrid?: () => void;
+  workflowCycle?: WorkflowCycle;
+  faqCount?: number;
+  onOpenFaqModal?: (tab: 'faq' | 'feedback') => void;
 }
 
 export const CanvasBoard: React.FC<CanvasBoardProps> = ({
@@ -101,8 +105,12 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
   onCanvasThemeChange,
   showGrid: externalShowGrid,
   onToggleGrid,
+  workflowCycle,
+  faqCount = 0,
+  onOpenFaqModal,
 }) => {
   const { currentUser } = useAuth();
+  const pipelineStages = useMemo(() => mapWorkflowStagesToPipelineStages(workflowCycle), [workflowCycle]);
   const containerRef = useRef<HTMLDivElement>(null);
   const [activeTool, setActiveTool] = useState<'select' | 'pan' | 'pen'>('select');
   const [isPanning, setIsPanning] = useState(false);
@@ -158,7 +166,7 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
 
   // Enrich projects with their live stage, company name, and screening status from the lifecycle store
   const enrichedProjects = useMemo(() => {
-    const stageOrder: StageId[] = PIPELINE_STAGES.map((s) => s.id);
+    const stageOrder: StageId[] = pipelineStages.map((s) => s.id);
     return projects.map((proj) => {
       const lifecycle = getLifecycleRecordForIdea({
         id: proj.id,
@@ -172,7 +180,7 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
       const effectiveStageId =
         lcStageIdx > projStageIdx ? lifecycle.currentStageId : proj.stageId;
       const effectiveStageMeta =
-        PIPELINE_STAGES.find((s) => s.id === effectiveStageId) || PIPELINE_STAGES[0];
+        pipelineStages.find((s) => s.id === effectiveStageId) || pipelineStages[0];
 
       const suffix = proj.stageTag?.match(/\d+/)?.[0] || String(proj.id).slice(-3);
       const nextStageTag = `[${effectiveStageMeta.tagPrefix}-${suffix}]`;
@@ -449,15 +457,33 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
           <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
           <span className="font-bold text-slate-800">Active Pipeline Workspace</span>
           <span className="text-slate-300">•</span>
-          <span className="text-slate-500 font-mono-code text-[11px]">8 STAGES SYNCED</span>
+          <span className="text-slate-500 font-mono-code text-[11px]">{pipelineStages.length} STAGES SYNCED</span>
           <span className="text-slate-300">•</span>
           <span className="text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 text-[10.5px]">
             Click any green stage circle to view CIPA, BURS & evaluation records
           </span>
         </div>
 
-        {/* Right: DENSITY: Compact | Normal | Expanded */}
+        {/* Right: Submitter FAQ & Feedback + DENSITY: Compact | Normal | Expanded */}
         <div className="flex items-center gap-2">
+          {currentUser?.role === 'Submitter' && onOpenFaqModal && (
+            <>
+              <button
+                type="button"
+                onClick={() => onOpenFaqModal('faq')}
+                className="px-2.5 py-1 rounded-lg bg-sky-50 hover:bg-sky-100 text-[#006194] border border-sky-200 font-bold text-[11px] transition-colors cursor-pointer"
+              >
+                FAQs ({faqCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenFaqModal('feedback')}
+                className="px-2.5 py-1 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200 font-bold text-[11px] transition-colors cursor-pointer"
+              >
+                Feedback
+              </button>
+            </>
+          )}
           <span className="font-mono-code text-[10.5px] uppercase font-bold text-slate-400">
             DENSITY:
           </span>
@@ -535,8 +561,8 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
               const toProj = enrichedProjects.find((p) => p.project.id === conn.toProjectId)?.project;
               if (!fromProj || !toProj) return null;
 
-              const fromStageIndex = PIPELINE_STAGES.findIndex((s) => s.id === fromProj.stageId);
-              const toStageIndex = PIPELINE_STAGES.findIndex((s) => s.id === toProj.stageId);
+              const fromStageIndex = pipelineStages.findIndex((s) => s.id === fromProj.stageId);
+              const toStageIndex = pipelineStages.findIndex((s) => s.id === toProj.stageId);
               if (fromStageIndex === -1 || toStageIndex === -1) return null;
 
               const x1 = getStageColumnX(fromStageIndex) + 320;
@@ -562,18 +588,18 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
             })}
           </svg>
 
-          {/* 8 Stage Column Headers + Row-by-Row Idea Stage Journey Tracks */}
+          {/* Dynamic Stage Column Headers + Row-by-Row Idea Stage Journey Tracks */}
           <div className="absolute left-8 top-6 pb-24">
-            {/* Row 1: 8 Stage Column Headers */}
+            {/* Row 1: Dynamic Stage Column Headers */}
             <div className="flex items-start gap-6 mb-5">
-              {PIPELINE_STAGES.map((stage) => {
+              {pipelineStages.map((stage, stageColIdx) => {
                 const stageCount = enrichedProjects.filter(
                   (item) => item.project.stageId === stage.id
                 ).length;
 
                 return (
                   <div
-                    key={stage.id}
+                    key={`${stage.id}-${stage.number}-${stageColIdx}`}
                     onDragOver={(e) => e.preventDefault()}
                     onDrop={(e) => {
                       e.preventDefault();
@@ -619,7 +645,7 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
               {enrichedProjects.map(({ project, lifecycle }) => {
                 const activeStageIdx = Math.max(
                   0,
-                  PIPELINE_STAGES.findIndex((s) => s.id === project.stageId)
+                  pipelineStages.findIndex((s) => s.id === project.stageId)
                 );
                 const isRejectedOverall =
                   lifecycle?.overallStatus === 'rejected' ||
@@ -630,7 +656,7 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
                     key={project.id}
                     className="relative flex items-center gap-6"
                   >
-                    {PIPELINE_STAGES.map((stage, stageIdx) => {
+                    {pipelineStages.map((stage, stageIdx) => {
                       const isCompletedPastStage = stageIdx < activeStageIdx;
                       const isCurrentStage = stageIdx === activeStageIdx;
                       const checkpoint = lifecycle?.stageCheckpoints?.[stage.id];
@@ -640,7 +666,7 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
 
                       return (
                         <div
-                          key={stage.id}
+                          key={`${stage.id}-${stage.number}-${stageIdx}`}
                           onDragOver={(e) => e.preventDefault()}
                           onDrop={(e) => {
                             e.preventDefault();
@@ -753,7 +779,7 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
                                   onClick={(e) => {
                                     e.stopPropagation();
                                     const screeningStage =
-                                      PIPELINE_STAGES.find((s) => s.id === 'screening') || stage;
+                                      pipelineStages.find((s) => s.id === 'screening') || stage;
                                     setInspectingStageItem({
                                       project,
                                       stage: screeningStage,
@@ -1145,17 +1171,17 @@ export const CanvasBoard: React.FC<CanvasBoardProps> = ({
           </div>
         )}
 
-        {/* Bottom-Left Minimap ("CANVAS RADAR / 8 Stages") */}
+        {/* Bottom-Left Minimap ("CANVAS RADAR / Dynamic Stages") */}
         <div className="fixed bottom-4 left-84 z-30 bg-white/95 backdrop-blur-md rounded-2xl border border-[#e2e8f0] shadow-xl p-3 select-none w-52">
           <div className="flex items-center justify-between text-[9.5px] font-mono-code font-bold text-slate-400 uppercase mb-2">
             <span>Canvas Radar</span>
-            <span>8 Stages</span>
+            <span>{pipelineStages.length} Stages</span>
           </div>
 
           <div className="relative h-14 bg-slate-50 rounded-xl p-1 border border-slate-100 flex items-center justify-between gap-1 overflow-hidden">
-            {PIPELINE_STAGES.map((st) => (
+            {pipelineStages.map((st, stIdx) => (
               <div
-                key={st.id}
+                key={`${st.id}-${st.number}-${stIdx}`}
                 style={{ backgroundColor: st.color }}
                 className="flex-1 h-full rounded opacity-35"
               />

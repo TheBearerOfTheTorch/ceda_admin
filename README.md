@@ -1,8 +1,4 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
-
-# Run and deploy your AI Studio app
+# Run and deploy 
 
 This contains everything you need to run your app locally.
 
@@ -13,8 +9,12 @@ View your app in AI Studio: https://ai.studio/apps/b14ea491-19b7-4511-8673-f5b37
 **Prerequisites:**  Node.js
 
 
-1. Install dependencies:
+1. Create a firebase account 
+2. Deploy the firebase rules to firebase firestore, storage and realtime database
+3. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. Set the api_key for the AI model in [.env.local](.env.local) 
 3. Run the app:
-   `npm run dev`
+   `npm run dev` for local deployment
+4. Run the app:
+   `npm run build` for cloud deployment

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { ProjectCardData, Reviewer } from '../../types/ceda';
-import { PIPELINE_STAGES } from '../../data/mockData';
+import { ProjectCardData, Reviewer, WorkflowCycle } from '../../types/ceda';
+import { mapWorkflowStagesToPipelineStages } from '../../lib/stageJourneyStore';
 import { useAuth } from '../../context/AuthContext';
 import {
   getCanonicalLifecycleKey,
@@ -36,6 +36,7 @@ interface ProjectDossierModalProps {
   onUpdateProject: (updated: ProjectCardData) => void;
   onAdvanceStage: (projectId: string) => void;
   onRegressStage: (projectId: string) => void;
+  workflowCycle?: WorkflowCycle;
 }
 
 export const ProjectDossierModal: React.FC<ProjectDossierModalProps> = ({
@@ -43,10 +44,12 @@ export const ProjectDossierModal: React.FC<ProjectDossierModalProps> = ({
   onClose,
   onUpdateProject,
   onAdvanceStage,
-  onRegressStage
+  onRegressStage,
+  workflowCycle,
 }) => {
   const { currentUser } = useAuth();
   const isSubmitter = currentUser?.role === 'Submitter';
+  const pipelineStages = useMemo(() => mapWorkflowStagesToPipelineStages(workflowCycle), [workflowCycle]);
 
   const [activeTab, setActiveTab] = useState<'overview' | 'financials' | 'compliance' | 'board_votes' | 'audit'>('overview');
   const [newComment, setNewComment] = useState('');
@@ -234,10 +237,10 @@ export const ProjectDossierModal: React.FC<ProjectDossierModalProps> = ({
 
   if (!project) return null;
 
-  const currentStage = PIPELINE_STAGES.find(s => s.id === project.stageId) || PIPELINE_STAGES[0];
-  const currentStageIndex = PIPELINE_STAGES.findIndex(s => s.id === project.stageId);
-  const nextStage = PIPELINE_STAGES[currentStageIndex + 1];
-  const prevStage = PIPELINE_STAGES[currentStageIndex - 1];
+  const currentStage = pipelineStages.find(s => s.id === project.stageId) || pipelineStages[0];
+  const currentStageIndex = pipelineStages.findIndex(s => s.id === project.stageId);
+  const nextStage = pipelineStages[currentStageIndex + 1];
+  const prevStage = pipelineStages[currentStageIndex - 1];
 
   const formatBWP = (amount: number) => {
     return new Intl.NumberFormat('en-BW', {

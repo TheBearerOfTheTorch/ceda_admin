@@ -18,8 +18,8 @@ import {
   subscribeToLifecycleRecords,
   IdeaLifecycleRecord,
 } from '../../lib/stageJourneyStore.ts';
-import { StageId, ProjectCardData } from '../../types/ceda.ts';
-import { PIPELINE_STAGES } from '../../data/mockData.ts';
+import { StageId, ProjectCardData, WorkflowCycle } from '../../types/ceda.ts';
+import { mapWorkflowStagesToPipelineStages, mapStageStepToStageId } from '../../lib/stageJourneyStore.ts';
 import {
   Send,
   Plus,
@@ -34,12 +34,17 @@ import {
   Radio,
   Clock,
   Bell,
+  HelpCircle,
+  MessageSquarePlus,
 } from 'lucide-react';
 
 interface SubmitterPanelProps {
   onOpenSubmitModal: () => void;
   onRefreshData?: () => void;
   presenceMap?: Record<string | number, 'online' | 'reviewing' | 'editing' | 'offline'>;
+  workflowCycle?: WorkflowCycle;
+  faqCount?: number;
+  onOpenFaqModal?: (tab: 'faq' | 'feedback') => void;
 }
 
 export const LIFECYCLE_STAGES: { id: string; stageId: StageId; label: string; step: number }[] = [
@@ -79,7 +84,29 @@ function mapStageIdToDbStage(stageId: StageId): string {
 export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
   onOpenSubmitModal,
   presenceMap = {},
+  workflowCycle,
+  faqCount = 0,
+  onOpenFaqModal,
 }) => {
+  const dynamicPipelineStages = useMemo(
+    () => mapWorkflowStagesToPipelineStages(workflowCycle),
+    [workflowCycle]
+  );
+
+  const dynamicLifecycleStages = useMemo(() => {
+    if (!workflowCycle?.stages?.length) return LIFECYCLE_STAGES;
+    const sorted = [...workflowCycle.stages].sort((a, b) => a.stepNumber - b.stepNumber);
+    return sorted.map((st, idx) => {
+      const stId = mapStageStepToStageId(st.stepNumber, st.name);
+      const dbId = mapStageIdToDbStage(stId);
+      return {
+        id: dbId === 'submission' && idx > 0 ? `stage_${st.stepNumber}` : dbId,
+        stageId: stId,
+        label: `${st.stepNumber}. ${st.name}`,
+        step: st.stepNumber,
+      };
+    });
+  }, [workflowCycle]);
   const { currentUser } = useAuth();
   const [innovations, setInnovations] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -132,15 +159,33 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
   };
 
   const fetchMyInnovations = async () => {
+    if (!currentUser) {
+      setInnovations([]);
+      setLoading(false);
+      return;
+    }
     try {
       setLoading(true);
-      const res = await fetch('/api/innovations');
+      const params = new URLSearchParams({
+        submitterId: String(currentUser.id),
+        submitterEmail: currentUser.email || '',
+      });
+      const res = await fetch(`/api/innovations?${params.toString()}`);
       if (res.ok) {
         const data = await res.json();
-        setInnovations(data);
-        if (data.length > 0 && selectedItemId === null) {
-          setSelectedItemId(data[0].id);
-        }
+        const myEmailLower = (currentUser.email || '').trim().toLowerCase();
+        const ownOnly = Array.isArray(data)
+          ? data.filter((item: any) => {
+              const matchesId = Number(item.submitterId) === Number(currentUser.id);
+              const matchesEmail =
+                Boolean(myEmailLower) &&
+                Boolean(item.submitter?.email) &&
+                String(item.submitter.email).trim().toLowerCase() === myEmailLower;
+              return matchesId || matchesEmail;
+            })
+          : [];
+        setInnovations(ownOnly);
+        setSelectedItemId(ownOnly.length > 0 ? ownOnly[0].id : null);
       }
     } catch (err) {
       console.warn('Failed to load submitter innovations:', err);
@@ -150,9 +195,23 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
   };
 
   useEffect(() => {
+    setInnovations([]);
+    setSelectedItemId(null);
     fetchMyInnovations();
 
     const unsubSubmissions = subscribeToNewSubmissions((newSub) => {
+      if (!currentUser) return;
+      const myEmailLower = (currentUser.email || '').trim().toLowerCase();
+      const subEmailLower = (newSub.submitterEmail || '').trim().toLowerCase();
+      const hasOwnerMeta = newSub.submitterId !== undefined || Boolean(subEmailLower);
+      const belongsToMe =
+        (newSub.submitterId !== undefined && Number(newSub.submitterId) === Number(currentUser.id)) ||
+        (Boolean(myEmailLower) && Boolean(subEmailLower) && subEmailLower === myEmailLower);
+
+      if (!hasOwnerMeta || !belongsToMe) {
+        return;
+      }
+
       setInnovations((prev) => {
         if (
           prev.some(
@@ -177,6 +236,7 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
           enterpriseName: newSub.enterpriseName || newSub.applicant?.organization,
           cipaNumber: newSub.cipaUin || newSub.cipaNumber,
           bursTin: newSub.bursTin,
+          submitterId: newSub.submitterId ?? currentUser.id,
           evaluations: [],
           adjudications: [],
         };
@@ -197,7 +257,7 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
       unsubLifecycle();
       unsubAudit();
     };
-  }, []);
+  }, [currentUser?.id, currentUser?.email]);
 
   // Enrich innovations with live stage progression & CIPA/BURS screening from stageJourneyStore
   const enrichedInnovations = useMemo(() => {
@@ -208,13 +268,15 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
         title: item.title,
       });
 
-      const dbStageIdx = LIFECYCLE_STAGES.findIndex((s) => s.id === item.currentStage);
+      const dbStageIdx = dynamicLifecycleStages.findIndex(
+        (s) => s.id === item.currentStage || s.stageId === item.currentStage
+      );
       const lifecycleStageIdx = lifecycle
-        ? LIFECYCLE_STAGES.findIndex((s) => s.stageId === lifecycle.currentStageId)
+        ? dynamicLifecycleStages.findIndex((s) => s.stageId === lifecycle.currentStageId)
         : -1;
 
       const resolvedStageIdx = Math.max(dbStageIdx >= 0 ? dbStageIdx : 0, lifecycleStageIdx);
-      const resolvedStageObj = LIFECYCLE_STAGES[resolvedStageIdx] || LIFECYCLE_STAGES[0];
+      const resolvedStageObj = dynamicLifecycleStages[resolvedStageIdx] || dynamicLifecycleStages[0];
 
       const resolvedStatus =
         lifecycle?.overallStatus === 'rejected'
@@ -239,7 +301,7 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
           item.category?.categoryName,
       };
     });
-  }, [innovations, lifecycleMap]);
+  }, [innovations, lifecycleMap, dynamicLifecycleStages]);
 
   const selectedItem = useMemo(() => {
     if (!selectedItemId) return enrichedInnovations[0] || null;
@@ -431,13 +493,35 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
           </p>
         </div>
 
-        <button
-          onClick={onOpenSubmitModal}
-          className="flex items-center gap-2 px-4 py-2.5 bg-[#006194] hover:bg-[#004b73] text-white text-xs font-bold rounded-xl shadow-xs transition-colors"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Submit New Innovation</span>
-        </button>
+        <div className="flex items-center gap-2 flex-wrap">
+          {onOpenFaqModal && (
+            <>
+              <button
+                type="button"
+                onClick={() => onOpenFaqModal('faq')}
+                className="flex items-center gap-1.5 px-3 py-2 bg-sky-50 hover:bg-sky-100 text-[#006194] border border-sky-200 text-xs font-bold rounded-xl shadow-2xs transition-colors cursor-pointer"
+              >
+                <HelpCircle className="w-4 h-4" />
+                <span>FAQs ({faqCount})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onOpenFaqModal('feedback')}
+                className="flex items-center gap-1.5 px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-200 text-xs font-bold rounded-xl shadow-2xs transition-colors cursor-pointer"
+              >
+                <MessageSquarePlus className="w-4 h-4 text-[#006194]" />
+                <span>System Feedback</span>
+              </button>
+            </>
+          )}
+          <button
+            onClick={onOpenSubmitModal}
+            className="flex items-center gap-2 px-4 py-2.5 bg-[#006194] hover:bg-[#004b73] text-white text-xs font-bold rounded-xl shadow-xs transition-colors"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Submit New Innovation</span>
+          </button>
+        </div>
       </div>
 
       {/* Grid: Submissions List & Selected Detail */}
@@ -639,22 +723,22 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
                   <div className="pt-2.5 border-t border-slate-100">
                     <div className="flex items-center justify-between text-[10.5px] font-mono-code text-slate-500 mb-2">
                       <span>
-                        Lifecycle Stage ({currentStageIdx + 1}/{LIFECYCLE_STAGES.length})
+                        Lifecycle Stage ({currentStageIdx + 1}/{dynamicLifecycleStages.length})
                       </span>
                       <strong className="text-[#006194] uppercase">
-                        {LIFECYCLE_STAGES[currentStageIdx]?.label}
+                        {dynamicLifecycleStages[currentStageIdx]?.label}
                       </strong>
                     </div>
 
                     <div className="flex items-center w-full py-1">
-                      {LIFECYCLE_STAGES.map((st, i) => {
+                      {dynamicLifecycleStages.map((st, i) => {
                         const isPassed = i < currentStageIdx;
                         const isActive = i === currentStageIdx;
                         const isStageRejected =
                           isActive && item.status === 'rejected';
 
                         return (
-                          <React.Fragment key={st.id}>
+                          <React.Fragment key={`${st.id}-${st.step}-${i}`}>
                             <button
                               type="button"
                               onClick={(e) => {
@@ -693,7 +777,7 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
                                 <span>{st.step}</span>
                               )}
                             </button>
-                            {i < LIFECYCLE_STAGES.length - 1 && (
+                            {i < dynamicLifecycleStages.length - 1 && (
                               <div
                                 className={`flex-1 h-0 mx-1 border-t-2 border-dashed ${i < currentStageIdx
                                     ? 'border-emerald-400'
@@ -882,14 +966,14 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
                 );
               })()}
 
-              {/* 8-Stage Progress Checklist (Clickable Green Stage Circles) */}
+              {/* Dynamic Stage Progress Checklist (Clickable Green Stage Circles) */}
               <div className="space-y-2 bg-slate-50 p-3.5 rounded-xl border border-slate-200">
                 <div className="flex items-center justify-between mb-1">
                   <span className="text-[10px] font-mono-code uppercase font-bold text-slate-500">
-                    8-Stage Evaluation Workflow (Click Green Circle to Inspect)
+                    {dynamicLifecycleStages.length}-Stage Evaluation Workflow (Click Green Circle to Inspect)
                   </span>
                 </div>
-                {LIFECYCLE_STAGES.map((st, idx) => {
+                {dynamicLifecycleStages.map((st, idx) => {
                   const currentIdx = selectedItem.resolvedStageIdx;
                   const isDone = idx < currentIdx;
                   const isCurrent = idx === currentIdx;
@@ -898,7 +982,7 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
 
                   return (
                     <div
-                      key={st.id}
+                      key={`${st.id}-${st.step}-${idx}`}
                       onClick={() => {
                         if (isDone || isCurrent) {
                           setInspectModalState({
@@ -1118,7 +1202,7 @@ export const SubmitterPanel: React.FC<SubmitterPanelProps> = ({
         project={inspectModalState ? toProjectCardData(inspectModalState.item) : null}
         stage={
           inspectModalState?.stageId
-            ? PIPELINE_STAGES.find((s) => s.id === inspectModalState.stageId) || null
+            ? dynamicPipelineStages.find((s) => s.id === inspectModalState.stageId) || null
             : null
         }
         lifecycleRecord={inspectModalState?.lifecycle || null}
